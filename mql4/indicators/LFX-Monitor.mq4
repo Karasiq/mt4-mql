@@ -7,8 +7,8 @@
  * @see  https://github.com/rosasurfer/mt4-tools/tree/master/app/lib/synthetic
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -198,7 +198,7 @@ int onInit() {
    }
 
    // setup the chart ticker
-   if (!This.IsTesting()) /*&&*/ if (!StrStartsWithI(GetServerName(), "XTrade-")) {
+   if (!This.IsTesting()) /*&&*/ if (!StrStartsWithI(GetAccountServer(), "XTrade-")) {
       int hWnd = __ExecutionContext[EC.hChart];
       int milliseconds = 500;
       int timerId = SetupTickTimer(hWnd, milliseconds, NULL);
@@ -218,7 +218,6 @@ int onInit() {
  * @return int - error status
  */
 int onDeinit() {
-   DeleteRegisteredObjects(NULL);
    QC.StopChannels();
    StoreRuntimeStatus();
 
@@ -275,7 +274,7 @@ int onTick() {
  */
 bool onCommand(string commands[]) {
    int size = ArraySize(commands);
-   if (!size) return(!warn("onCommand(1)  empty parameter commands = {}"));
+   if (!size) return(!logWarn("onCommand(1)  empty parameter commands: {}"));
 
    for (int i=0; i < size; i++) {
       if (StrStartsWith(commands[i], "cmd=account:")) {
@@ -290,7 +289,7 @@ bool onCommand(string commands[]) {
          }
          continue;
       }
-      warn("onCommand(2)  unknown command = "+ DoubleQuoteStr(commands[i]));
+      logWarn("onCommand(2)  unknown command: "+ DoubleQuoteStr(commands[i]));
    }
    return(!catch("onCommand(3)"));
 }
@@ -347,7 +346,7 @@ bool RefreshLfxOrders() {
  */
 int CreateLabels() {
    // trade account
-   label.tradeAccount = __NAME() +".TradeAccount";
+   label.tradeAccount = ProgramName() +".TradeAccount";
    if (ObjectFind(label.tradeAccount) == 0)
       ObjectDelete(label.tradeAccount);
    if (ObjectCreate(label.tradeAccount, OBJ_LABEL, 0, 0, 0)) {
@@ -355,14 +354,14 @@ int CreateLabels() {
       ObjectSet    (label.tradeAccount, OBJPROP_XDISTANCE, 6);
       ObjectSet    (label.tradeAccount, OBJPROP_YDISTANCE, 4);
       ObjectSetText(label.tradeAccount, " ", 1);
-      ObjectRegister(label.tradeAccount);
+      RegisterObject(label.tradeAccount);
    }
    else GetLastError();
 
    // index display
    int counter = 10;                                     // a counter for creating unique labels (with at least 2 digits)
    // background rectangles
-   string label = StringConcatenate(__NAME(), ".", counter, ".Background");
+   string label = StringConcatenate(ProgramName(), ".", counter, ".Background");
    if (ObjectFind(label) == 0)
       ObjectDelete(label);
    if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
@@ -370,12 +369,12 @@ int CreateLabels() {
       ObjectSet    (label, OBJPROP_XDISTANCE, 7);
       ObjectSet    (label, OBJPROP_YDISTANCE, 7);
       ObjectSetText(label, "g", 128, "Webdings", bgColor);
-      ObjectRegister(label);
+      RegisterObject(label);
    }
    else GetLastError();
 
    counter++;
-   label = StringConcatenate(__NAME(), ".", counter, ".Background");
+   label = StringConcatenate(ProgramName(), ".", counter, ".Background");
    if (ObjectFind(label) == 0)
       ObjectDelete(label);
    if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
@@ -383,7 +382,7 @@ int CreateLabels() {
       ObjectSet    (label, OBJPROP_XDISTANCE,  7);
       ObjectSet    (label, OBJPROP_YDISTANCE, 81);
       ObjectSetText(label, "g", 128, "Webdings", bgColor);
-      ObjectRegister(label);
+      RegisterObject(label);
    }
    else GetLastError();
 
@@ -392,7 +391,7 @@ int CreateLabels() {
 
    // animation
    counter++;
-   label = StringConcatenate(__NAME(), ".", counter, ".Header.animation");
+   label = StringConcatenate(ProgramName(), ".", counter, ".Header.animation");
    if (ObjectFind(label) == 0)
       ObjectDelete(label);
    if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
@@ -400,13 +399,13 @@ int CreateLabels() {
       ObjectSet    (label, OBJPROP_XDISTANCE, 165   );
       ObjectSet    (label, OBJPROP_YDISTANCE, yCoord);
       ObjectSetText(label, label.animation.chars[0], fontSize, fontName, fontColor);
-      ObjectRegister(label);
+      RegisterObject(label);
       label.animation = label;
    }
    else GetLastError();
 
    // recording status
-   label = StringConcatenate(__NAME(), ".", counter, ".Recording.status");
+   label = StringConcatenate(ProgramName(), ".", counter, ".Recording.status");
    if (ObjectFind(label) == 0)
       ObjectDelete(label);
    if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
@@ -415,7 +414,7 @@ int CreateLabels() {
       ObjectSet    (label, OBJPROP_YDISTANCE, yCoord);
          string text = ifString(Recording.Enabled, "Recording to "+ serverName, "Recording:  off");
       ObjectSetText(label, text, fontSize, fontName, fontColor);
-      ObjectRegister(label);
+      RegisterObject(label);
    }
    else GetLastError();
 
@@ -426,7 +425,7 @@ int CreateLabels() {
       counter++;
 
       // symbol
-      label = StringConcatenate(__NAME(), ".", counter, ".", symbols[i]);
+      label = StringConcatenate(ProgramName(), ".", counter, ".", symbols[i]);
       if (ObjectFind(label) == 0)
          ObjectDelete(label);
       if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
@@ -434,7 +433,7 @@ int CreateLabels() {
          ObjectSet    (label, OBJPROP_XDISTANCE, 129          );
          ObjectSet    (label, OBJPROP_YDISTANCE, yCoord + i*15);
          ObjectSetText(label, symbols[i] +":", fontSize, fontName, fontColor);
-         ObjectRegister(label);
+         RegisterObject(label);
          labels[i] = label;
       }
       else GetLastError();
@@ -449,7 +448,7 @@ int CreateLabels() {
          ObjectSet    (label, OBJPROP_YDISTANCE, yCoord + i*15);
             text = ifString(!isEnabled[i], "off", "n/a");
          ObjectSetText(label, text, fontSize, fontName, fontColor.recordingOff);
-         ObjectRegister(label);
+         RegisterObject(label);
       }
       else GetLastError();
 
@@ -462,7 +461,7 @@ int CreateLabels() {
          ObjectSet    (label, OBJPROP_XDISTANCE, 15);
          ObjectSet    (label, OBJPROP_YDISTANCE, yCoord + i*15);
          ObjectSetText(label, " ");
-         ObjectRegister(label);
+         RegisterObject(label);
       }
       else GetLastError();
    }
@@ -824,7 +823,7 @@ bool RecordIndices() {
  * @return bool - success status
  */
 bool UpdateAccountDisplay() {
-   if (mode.remote.trading) {
+   if (mode.extern) {
       string text = "Limits:  "+ tradeAccount.name +", "+ tradeAccount.company +", "+ tradeAccount.number +", "+ tradeAccount.currency;
       ObjectSetText(label.tradeAccount, text, 8, "Arial Fett", ifInt(tradeAccount.type==ACCOUNT_TYPE_DEMO, LimeGreen, DarkOrange));
    }
@@ -833,38 +832,38 @@ bool UpdateAccountDisplay() {
    }
 
    int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)             // with open properties dialog or on Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                 // on Object::onDrag() or opened "Properties" dialog
       return(true);
    return(!catch("UpdateAccountDisplay(1)", error));
 }
 
 
 /**
- * Speichert die Laufzeitkonfiguration im Fenster (für init-Cycle und neue Templates) und im Chart (für Terminal-Restart).
+ * Store the runtime configuration in the chart window (init cycles and template reload) and in the chart (terminal restart).
  *
- *  (1) string tradeAccount.company, int tradeAccount.number
+ * vars: string tradeAccount.company
+ *       int    tradeAccount.number
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool StoreRuntimeStatus() {
-   // (1) string tradeAccount.company, int tradeAccount.number
-   // Company-ID im Fenster speichern
+   // store company alias in chart window
    int    hWnd = __ExecutionContext[EC.hChart];
-   string key  = __NAME() +".runtime.tradeAccount.company";          // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   SetWindowProperty(hWnd, key, AccountCompanyId(tradeAccount.company));
+   string key  = ProgramName() +".runtime.tradeAccount.company";   // TODO: add program pid and manage keys globally
+   SetWindowStringA(hWnd, key, tradeAccount.company);
 
-   // Company-ID im Chart speichern
+   // store company alias in chart
    if (ObjectFind(key) == 0)
       ObjectDelete(key);
    ObjectCreate (key, OBJ_LABEL, 0, 0, 0);
    ObjectSet    (key, OBJPROP_TIMEFRAMES, OBJ_PERIODS_NONE);
-   ObjectSetText(key, ""+ AccountCompanyId(tradeAccount.company));
+   ObjectSetText(key, tradeAccount.company);
 
-   // AccountNumber im Fenster speichern
-   key = __NAME() +".runtime.tradeAccount.number";                   // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   SetWindowProperty(hWnd, key, tradeAccount.number);
+   // store account number in chart window
+   key = ProgramName() +".runtime.tradeAccount.number";            // TODO: add program pid and manage keys globally
+   SetWindowIntegerA(hWnd, key, tradeAccount.number);
 
-   // AccountNumber im Chart speichern
+   // store account number in chart
    if (ObjectFind(key) == 0)
       ObjectDelete(key);
    ObjectCreate (key, OBJ_LABEL, 0, 0, 0);
@@ -876,51 +875,42 @@ bool StoreRuntimeStatus() {
 
 
 /**
- * Restauriert eine im Fenster oder im Chart gespeicherte Laufzeitkonfiguration.
+ * Restore the runtime configuration from the chart and/or chart window.
  *
- *  (1) string tradeAccount.company, int tradeAccount.number
+ * vars: string tradeAccount.company
+ *       int    tradeAccount.number
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool RestoreRuntimeStatus() {
-   // (1) string tradeAccount.company, int tradeAccount.number
-   int companyId, accountNumber;
-   // Company-ID im Fenster suchen
-   int    hWnd    = __ExecutionContext[EC.hChart];
-   string key     = __NAME() +".runtime.tradeAccount.company";          // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   int    value   = GetWindowProperty(hWnd, key);
-   bool   success = (value != 0);
-   // bei Mißerfolg Company-ID im Chart suchen
-   if (!success) {
-      if (ObjectFind(key) == 0) {
-         value   = StrToInteger(ObjectDescription(key));
-         success = (value != 0);
-      }
+   // lookup company alias in chart window
+   int    hWnd = __ExecutionContext[EC.hChart];
+   string key  = ProgramName() +".runtime.tradeAccount.company";    // TODO: add program pid and manage keys globally
+   string company = GetWindowStringA(hWnd, key);
+   if (!StringLen(company)) {
+      // lookup company alias in chart
+      if (ObjectFind(key) == 0)
+         company = ObjectDescription(key);
    }
-   if (success) companyId = value;
 
-   // AccountNumber im Fenster suchen
-   key     = __NAME() +".runtime.tradeAccount.number";                  // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   value   = GetWindowProperty(hWnd, key);
-   success = (value != 0);
-   // bei Mißerfolg AccountNumber im Chart suchen
-   if (!success) {
-      if (ObjectFind(key) == 0) {
-         value   = StrToInteger(ObjectDescription(key));
-         success = (value != 0);
-      }
+   // lookup account number in chart window
+   key = ProgramName() +".runtime.tradeAccount.number";             // TODO: add program pid and manage keys globally
+   int accountNumber = GetWindowIntegerA(hWnd, key);
+   if (!accountNumber) {
+      // lookup account number in chart
+      if (ObjectFind(key) == 0)
+         accountNumber = StrToInteger(ObjectDescription(key));
    }
-   if (success) accountNumber = value;
 
-   // Account restaurieren
-   if (companyId && accountNumber) {
-      string company = tradeAccount.company;
-      int    number  = tradeAccount.number;
+   // restore account data
+   if (StringLen(company) && accountNumber) {
+      string oldCompany    = tradeAccount.company;
+      int oldAccountNumber = tradeAccount.number;
 
-      if (!InitTradeAccount(companyId +":"+ accountNumber)) return(false);
-      if (tradeAccount.company!=company || tradeAccount.number!=number) {
-         if (!UpdateAccountDisplay())                       return(false);
-         if (!RefreshLfxOrders())                           return(false);
+      if (!InitTradeAccount(company +":"+ accountNumber)) return(false);
+      if (tradeAccount.company!=oldCompany || tradeAccount.number!=oldAccountNumber) {
+         if (!UpdateAccountDisplay())                     return(false);
+         if (!RefreshLfxOrders())                         return(false);
       }
    }
    return(!catch("RestoreRuntimeStatus(1)"));

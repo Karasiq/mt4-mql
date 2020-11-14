@@ -2,8 +2,8 @@
  * Donchian Channel Indikator
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -43,19 +43,18 @@ int onInit() {
 
    // Anzeigeoptionen
    string indicatorName = "Donchian Channel("+ Periods +")";
-   IndicatorShortName(indicatorName);
-
-   SetIndexLabel(0, "Donchian Upper("+ Periods +")");                // Daten-Anzeige
+   IndicatorShortName(indicatorName);                               // chart tooltips and context menu
+   SetIndexLabel(0, "Donchian Upper("+ Periods +")");               // chart tooltips and "Data" window
    SetIndexLabel(1, "Donchian Lower("+ Periods +")");
    IndicatorDigits(Digits);
 
    // Legende
    if (!IsSuperContext()) {
-       string legendLabel = CreateLegendLabel(indicatorName);
-       ObjectRegister(legendLabel);
+       string legendLabel = CreateLegendLabel();
+       RegisterObject(legendLabel);
        ObjectSetText (legendLabel, indicatorName, 9, "Arial Fett", Blue);
        int error = GetLastError();
-       if (error!=NO_ERROR) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST) // bei offenem Properties-Dialog oder Object::onDrag()
+       if (error!=NO_ERROR) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)   // on Object::onDrag() or opened "Properties" dialog
           return(catch("onInit(2)", error));
    }
 
@@ -72,10 +71,7 @@ int onInit() {
  * @return int - Fehlerstatus
  */
 int onDeinit() {
-
    // TODO: bei Parameteränderungen darf die vorhandene Legende nicht gelöscht werden
-
-   DeleteRegisteredObjects(NULL);
    RepositionLegend();
    return(catch("onDeinit(1)"));
 }
@@ -89,9 +85,9 @@ int onDeinit() {
 int onTick() {
    // Abschluß der Buffer-Initialisierung überprüfen
    if (!ArraySize(iUpperLevel))                                      // kann bei Terminal-Start auftreten
-      return(log("onTick(1)  size(iUpperLevel) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+      return(logInfo("onTick(1)  size(iUpperLevel) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
-   // reset all buffers and delete garbage behind Max.Values before doing a full recalculation
+   // reset all buffers and delete garbage behind Max.Bars before doing a full recalculation
    if (!UnchangedBars) {
       ArrayInitialize(iUpperLevel, EMPTY_VALUE);
       ArrayInitialize(iLowerLevel, EMPTY_VALUE);
@@ -122,7 +118,7 @@ int onTick() {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
    IndicatorBuffers(indicator_buffers);

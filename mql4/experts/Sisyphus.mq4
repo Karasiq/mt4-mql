@@ -5,9 +5,9 @@
  * Note: Work in progress, not yet ready for testing or trading.
  */
 #include <stddefines.mqh>
-#include <app/snowroller/defines.mqh>
-int   __INIT_FLAGS__[] = {INIT_TIMEZONE, INIT_PIPVALUE};
-int __DEINIT_FLAGS__[];
+#include <apps/snowroller/defines.mqh>
+int   __InitFlags[] = {INIT_TIMEZONE, INIT_PIPVALUE, INIT_BUFFERED_LOG};
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -201,9 +201,9 @@ bool     tester.reduceStatusWrites  = true;        // whether to minimize status
 bool     tester.showBreakeven       = false;       // whether to show breakeven markers in tester
 
 
-#include <app/snowroller/1-init.mqh>
-#include <app/snowroller/2-deinit.mqh>
-#include <app/snowroller/functions.mqh>
+#include <apps/snowroller/init.mqh>
+#include <apps/snowroller/deinit.mqh>
+#include <apps/snowroller/functions.mqh>
 
 
 /**
@@ -415,7 +415,7 @@ bool SaveStatus() {
  * @return int - the same error or the current error status if no error was passed
  */
 int ShowStatus(int error = NO_ERROR) {
-   if (!__CHART()) return(error);
+   if (!IsChart()) return(error);
 
    Comment(NL, NL, NL, NL, "ShowStatus()  not implemented");
    return(error);

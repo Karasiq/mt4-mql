@@ -7,8 +7,8 @@
  * TODO: add a moving average as signal line
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -17,7 +17,7 @@ extern int   MMI.Periods = 100;
 extern color Line.Color  = Blue;
 extern int   Line.Width  = 1;
 
-extern int   Max.Values  = 5000;                            // max. amount of values to calculate (-1: all)
+extern int   Max.Bars    = 10000;                           // max. values to calculate (-1: all available)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -32,7 +32,8 @@ extern int   Max.Values  = 5000;                            // max. amount of va
 #property indicator_color1    Blue
 
 double bufferMMI[];
-int    mmi.periods;
+
+int mmi.periods;
 
 
 /**
@@ -53,8 +54,8 @@ int onInit() {
    if (Line.Width < 0)  return(catch("onInit(2)  Invalid input parameter Line.Width = "+ Line.Width, ERR_INVALID_INPUT_PARAMETER));
    if (Line.Width > 5)  return(catch("onInit(3)  Invalid input parameter Line.Width = "+ Line.Width, ERR_INVALID_INPUT_PARAMETER));
 
-   // Max.Values
-   if (Max.Values < -1) return(catch("onInit(4)  Invalid input parameter Max.Values = "+ Max.Values, ERR_INVALID_INPUT_PARAMETER));
+   // Max.Bars
+   if (Max.Bars < -1)   return(catch("onInit(4)  Invalid input parameter Max.Bars = "+ Max.Bars, ERR_INVALID_INPUT_PARAMETER));
 
 
    // (2) indicator buffer management
@@ -63,15 +64,15 @@ int onInit() {
 
    // (3) names, labels, data display
    string name = "Market Meanness("+ mmi.periods +")";
-   SetIndexLabel(MODE_MAIN, name);                                   // "Data" window and tooltips
-   IndicatorShortName(name +"  ");                                   // indicator subwindow and context menu
+   IndicatorShortName(name +"  ");                                   // chart subwindow and context menu
+   SetIndexLabel(MODE_MAIN, name);                                   // chart tooltips and "Data" window
    IndicatorDigits(1);
 
 
    // (4) drawing options and styles
    int startDraw = 0;
-   if (Max.Values >= 0) startDraw += Bars - Max.Values;
-   if (startDraw  <  0) startDraw  = 0;
+   if (Max.Bars >= 0) startDraw += Bars - Max.Bars;
+   if (startDraw < 0) startDraw = 0;
    SetIndexDrawBegin(MODE_MAIN, startDraw);
    SetLevelValue(0, 75);
    SetLevelValue(1, 50);
@@ -87,10 +88,10 @@ int onInit() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(bufferMMI)) return(log("onTick(1)  size(bufferMMI) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(bufferMMI)) return(logInfo("onTick(1)  size(bufferMMI) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
-   // reset all buffers and delete garbage behind Max.Values before doing a full recalculation
+   // reset all buffers and delete garbage behind Max.Bars before doing a full recalculation
    if (!UnchangedBars) {
       ArrayInitialize(bufferMMI, EMPTY_VALUE);
       SetIndicatorOptions();
@@ -104,10 +105,10 @@ int onTick() {
 
    // (1) calculate start bar
    int changedBars = ChangedBars;
-   if (Max.Values >= 0) /*&&*/ if (ChangedBars > Max.Values)
-      changedBars = Max.Values;
+   if (Max.Bars >= 0) /*&&*/ if (ChangedBars > Max.Bars)
+      changedBars = Max.Bars;
    int startBar = Min(changedBars-1, Bars-mmi.periods);
-   if (startBar < 0) return(catch("onTick(2)", ERR_HISTORY_INSUFFICIENT));
+   if (startBar < 0) return(logInfo("onTick(2)  Tick="+ Tick, ERR_HISTORY_INSUFFICIENT));
 
 
    // (2) recalculate changed bars
@@ -130,7 +131,7 @@ int onTick() {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
    IndicatorBuffers(indicator_buffers);
@@ -147,10 +148,8 @@ void SetIndicatorOptions() {
  */
 string InputsToStr() {
    return(StringConcatenate("MMI.Periods=", MMI.Periods,            ";", NL,
-
                             "Line.Color=",  ColorToStr(Line.Color), ";", NL,
                             "Line.Width=",  Line.Width,             ";", NL,
-
-                            "Max.Values=",  Max.Values,             ";")
+                            "Max.Bars=",    Max.Bars,               ";")
    );
 }

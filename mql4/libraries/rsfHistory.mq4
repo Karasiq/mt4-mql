@@ -13,8 +13,8 @@
 #property library
 
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 #include <core/library.mqh>
 #include <stdfunctions.mqh>
 #include <rsfLibs.mqh>
@@ -134,7 +134,7 @@ int HistorySet.Create(string symbol, string copyright, int digits, int format, s
    if (digits < 0)                            return(!catch("HistorySet.Create(4)  invalid parameter digits = "+ digits +" [hstSet="+ DoubleQuoteStr(symbol) +"]", ERR_INVALID_PARAMETER));
    if (format!=400) /*&&*/ if (format!=401)   return(!catch("HistorySet.Create(5)  invalid parameter format = "+ format +" (can be 400 or 401) [hstSet="+ DoubleQuoteStr(symbol) +"]", ERR_INVALID_PARAMETER));
    if (server == "0")      server = "";                                          // (string) NULL
-   if (!StringLen(server)) server = GetServerName();
+   if (!StringLen(server)) server = GetAccountServer();
 
 
    // (1) offene Set-Handles durchsuchen und Sets schließen
@@ -265,7 +265,7 @@ int HistorySet.Get(string symbol, string server="") {
    if (StrContains(symbol, " "))              return(!catch("HistorySet.Get(3)  invalid parameter symbol = "+ DoubleQuoteStr(symbol) +" (must not contain spaces)", ERR_INVALID_PARAMETER));
    string symbolUpper = StrToUpper(symbol);
    if (server == "0")      server = "";                                 // (string) NULL
-   if (!StringLen(server)) server = GetServerName();
+   if (!StringLen(server)) server = GetAccountServer();
 
 
    // (1) offene Set-Handles durchsuchen
@@ -318,7 +318,7 @@ int HistorySet.Get(string symbol, string server="") {
          fileSize = FileSize(hFile);                                    // Datei geöffnet
          if (fileSize < HISTORY_HEADER.size) {
             FileClose(hFile);
-            warn("HistorySet.Get(5)  invalid history file \""+ mqlFileName +"\" found (size="+ fileSize +")");
+            logWarn("HistorySet.Get(5)  invalid history file \""+ mqlFileName +"\" found (size="+ fileSize +")");
             continue;
          }
                                                                         // HISTORY_HEADER auslesen
@@ -458,7 +458,7 @@ int HistoryFile.Open(string symbol, int timeframe, string copyright, int digits,
    bool read_write =  (mode & FILE_READ) && (mode & FILE_WRITE);
 
    if (server == "0")      server = "";                                             // (string) NULL
-   if (!StringLen(server)) server = GetServerName();
+   if (!StringLen(server)) server = GetAccountServer();
 
 
    // (1) Datei öffnen
@@ -537,10 +537,10 @@ int HistoryFile.Open(string symbol, int timeframe, string copyright, int digits,
                to.nextCloseTime   = to.closeTime   + periodSecs;
             }
             else if (timeframe == PERIOD_MN1) {
-               from.closeTime     = DateTime(TimeYearFix(from.openTime), TimeMonth(from.openTime)+1);    // 00:00, 1. des nächsten Monats
-               from.nextCloseTime = DateTime(TimeYearFix(from.openTime), TimeMonth(from.openTime)+2);    // 00:00, 1. des übernächsten Monats
-               to.closeTime       = DateTime(TimeYearFix(to.openTime  ), TimeMonth(to.openTime  )+1);    // 00:00, 1. des nächsten Monats
-               to.nextCloseTime   = DateTime(TimeYearFix(to.openTime  ), TimeMonth(to.openTime  )+2);    // 00:00, 1. des übernächsten Monats
+               from.closeTime     = DateTime(TimeYearEx(from.openTime), TimeMonth(from.openTime)+1);     // 00:00, 1. des nächsten Monats
+               from.nextCloseTime = DateTime(TimeYearEx(from.openTime), TimeMonth(from.openTime)+2);     // 00:00, 1. des übernächsten Monats
+               to.closeTime       = DateTime(TimeYearEx(to.openTime  ), TimeMonth(to.openTime  )+1);     // 00:00, 1. des nächsten Monats
+               to.nextCloseTime   = DateTime(TimeYearEx(to.openTime  ), TimeMonth(to.openTime  )+2);     // 00:00, 1. des übernächsten Monats
             }
          }
       }
@@ -827,8 +827,8 @@ bool HistoryFile.ReadBar(int hFile, int offset, double &bar[]) {
       nextCloseTime = closeTime + hf.periodSecs[hFile];
    }
    else if (hf.period[hFile] == PERIOD_MN1) {
-      closeTime     = DateTime(TimeYearFix(openTime), TimeMonth(openTime)+1);    // 00:00, 1. des nächsten Monats
-      nextCloseTime = DateTime(TimeYearFix(openTime), TimeMonth(openTime)+2);    // 00:00, 1. des übernächsten Monats
+      closeTime     = DateTime(TimeYearEx(openTime), TimeMonth(openTime)+1);     // 00:00, 1. des nächsten Monats
+      nextCloseTime = DateTime(TimeYearEx(openTime), TimeMonth(openTime)+2);     // 00:00, 1. des übernächsten Monats
    }
 
    hf.lastStoredBar.offset       [hFile]        = offset;
@@ -945,8 +945,8 @@ bool HistoryFile.WriteBar(int hFile, int offset, double bar[], int flags=NULL) {
          nextCloseTime = closeTime + hf.periodSecs[hFile];
       }
       else if (hf.period[hFile] == PERIOD_MN1) {
-         closeTime     = DateTime(TimeYearFix(openTime), TimeMonth(openTime)+1); // 00:00, 1. des nächsten Monats
-         nextCloseTime = DateTime(TimeYearFix(openTime), TimeMonth(openTime)+2); // 00:00, 1. des übernächsten Monats
+         closeTime     = DateTime(TimeYearEx(openTime), TimeMonth(openTime)+1);  // 00:00, 1. des nächsten Monats
+         nextCloseTime = DateTime(TimeYearEx(openTime), TimeMonth(openTime)+2);  // 00:00, 1. des übernächsten Monats
       }
       hf.lastStoredBar.offset       [hFile] = offset;
       hf.lastStoredBar.openTime     [hFile] = openTime;
@@ -1120,7 +1120,7 @@ bool HistoryFile._WriteLastStoredBar(int hFile, int flags=NULL) {
       hf.hFile.lastValid = hFile;
    }
    int offset = hf.lastStoredBar.offset[hFile];
-   if (offset < 0)                      return(_true(warn("HistoryFile._WriteLastStoredBar(5)  undefined lastStoredBar: hf.lastStoredBar.offset = "+ offset +" [hstFile="+ DoubleQuoteStr(hf.symbol[hFile] +","+ PeriodDescription(hf.period[hFile])) +"]")));
+   if (offset < 0)                      return(_true(logWarn("HistoryFile._WriteLastStoredBar(5)  undefined lastStoredBar: hf.lastStoredBar.offset = "+ offset +" [hstFile="+ DoubleQuoteStr(hf.symbol[hFile] +","+ PeriodDescription(hf.period[hFile])) +"]")));
    if (offset >= hf.stored.bars[hFile]) return(!catch("HistoryFile._WriteLastStoredBar(6)  invalid hf.lastStoredBar.offset = "+ offset +" ("+ hf.stored.bars[hFile] +" stored bars) [hstFile="+ DoubleQuoteStr(hf.symbol[hFile] +","+ PeriodDescription(hf.period[hFile])) +"]", ERR_INVALID_PARAMETER));
 
 
@@ -1191,7 +1191,7 @@ bool HistoryFile._WriteBufferedBar(int hFile, int flags=NULL) {
       hf.hFile.lastValid = hFile;
    }
    int offset = hf.bufferedBar.offset[hFile];
-   if (offset < 0)                      return(_true(warn("HistoryFile._WriteBufferedBar(5)  undefined bufferedBar: hf.bufferedBar.offset = "+ offset +" [hstFile="+ DoubleQuoteStr(hf.symbol[hFile] +","+ PeriodDescription(hf.period[hFile])) +"]")));
+   if (offset < 0)                      return(_true(logWarn("HistoryFile._WriteBufferedBar(5)  undefined bufferedBar: hf.bufferedBar.offset = "+ offset +" [hstFile="+ DoubleQuoteStr(hf.symbol[hFile] +","+ PeriodDescription(hf.period[hFile])) +"]")));
    if (offset != hf.full.bars[hFile]-1) return(!catch("HistoryFile._WriteBufferedBar(6)  invalid hf.bufferedBar.offset = "+ offset +" ("+ hf.full.bars[hFile] +" full bars) [hstFile="+ DoubleQuoteStr(hf.symbol[hFile] +","+ PeriodDescription(hf.period[hFile])) +"]", ERR_RUNTIME_ERROR));
 
 
@@ -1361,8 +1361,8 @@ bool HistoryFile.AddTick(int hFile, datetime time, double value, int flags=NULL)
       if (hf.bufferedBar.offset[hFile] < 0) {                                          // BufferedBar ist leer
          if (tick.offset == -1) {
             if      (hf.period[hFile] <= PERIOD_D1 ) tick.openTime = tick.time - tick.time%hf.periodSecs[hFile];
-            else if (hf.period[hFile] == PERIOD_W1 ) tick.openTime = tick.time - tick.time%DAYS - (TimeDayOfWeekFix(tick.time)+6)%7*DAYS;       // 00:00, Montag
-            else if (hf.period[hFile] == PERIOD_MN1) tick.openTime = tick.time - tick.time%DAYS - (TimeDayFix(tick.time)-1)*DAYS;               // 00:00, 1. des Monats
+            else if (hf.period[hFile] == PERIOD_W1 ) tick.openTime = tick.time - tick.time%DAYS - (TimeDayOfWeekEx(tick.time)+6)%7*DAYS;        // 00:00, Montag
+            else if (hf.period[hFile] == PERIOD_MN1) tick.openTime = tick.time - tick.time%DAYS - (TimeDayEx(tick.time)-1)*DAYS;                // 00:00, 1. des Monats
             tick.offset = HistoryFile.FindBar(hFile, tick.openTime, barExists); if (tick.offset < 0) return(false);
          }
          if (tick.offset < hf.full.bars[hFile]) {                                      // Tickbar existiert, laden
@@ -1386,8 +1386,8 @@ bool HistoryFile.AddTick(int hFile, datetime time, double value, int flags=NULL)
                nextCloseTime = closeTime     + hf.periodSecs[hFile];
             }
             else if (hf.period[hFile] == PERIOD_MN1) {
-               closeTime     = DateTime(TimeYearFix(tick.openTime), TimeMonth(tick.openTime)+1);   // 00:00, 1. des nächsten Monats
-               nextCloseTime = DateTime(TimeYearFix(tick.openTime), TimeMonth(tick.openTime)+2);   // 00:00, 1. des übernächsten Monats
+               closeTime     = DateTime(TimeYearEx(tick.openTime), TimeMonth(tick.openTime)+1);    // 00:00, 1. des nächsten Monats
+               nextCloseTime = DateTime(TimeYearEx(tick.openTime), TimeMonth(tick.openTime)+2);    // 00:00, 1. des übernächsten Monats
             }
             hf.bufferedBar.offset       [hFile]        = tick.offset;
             hf.bufferedBar.openTime     [hFile]        = tick.openTime;
@@ -1448,8 +1448,8 @@ bool HistoryFile.AddTick(int hFile, datetime time, double value, int flags=NULL)
    // (3.2) BufferedBar ist leer: Tickbar mit Tick aktualisieren oder neue Bar mit Tick zu History hinzufügen
    if (tick.offset == -1) {
       if      (hf.period[hFile] <= PERIOD_D1 ) tick.openTime = tick.time - tick.time%hf.periodSecs[hFile];
-      else if (hf.period[hFile] == PERIOD_W1 ) tick.openTime = tick.time - tick.time%DAYS - (TimeDayOfWeekFix(tick.time)+6)%7*DAYS;       // 00:00, Montag
-      else if (hf.period[hFile] == PERIOD_MN1) tick.openTime = tick.time - tick.time%DAYS - (TimeDayFix(tick.time)-1)*DAYS;               // 00:00, 1. des Monats
+      else if (hf.period[hFile] == PERIOD_W1 ) tick.openTime = tick.time - tick.time%DAYS - (TimeDayOfWeekEx(tick.time)+6)%7*DAYS;          // 00:00, Montag
+      else if (hf.period[hFile] == PERIOD_MN1) tick.openTime = tick.time - tick.time%DAYS - (TimeDayEx(tick.time)-1)*DAYS;                  // 00:00, 1. des Monats
       tick.offset = HistoryFile.FindBar(hFile, tick.openTime, barExists); if (tick.offset < 0) return(false);
    }
    if (tick.offset < hf.full.bars[hFile]) {
@@ -1575,7 +1575,7 @@ bool __CheckFileHandles() {
 
    for (int i=0; i < size; i++) {
       if (hf.hFile[i] > 0) {
-         warn("__CheckFileHandles(1)  open file handle #"+ hf.hFile[i] +" found [hstFile="+ DoubleQuoteStr(hf.symbol[i] +","+ PeriodDescription(hf.period[i])) +"]");
+         logWarn("__CheckFileHandles(1)  open file handle #"+ hf.hFile[i] +" found [hstFile="+ DoubleQuoteStr(hf.symbol[i] +","+ PeriodDescription(hf.period[i])) +"]");
          if (!HistoryFile.Close(hf.hFile[i]))
             error = last_error;
       }
@@ -1671,7 +1671,7 @@ int CreateSymbol(string symbol, string description, string group, int digits, st
  */
 int GetSymbolGroups(/*SYMBOL_GROUP*/int sgs[], string serverName="") {
    if (serverName == "0")      serverName = "";                      // (string) NULL
-   if (!StringLen(serverName)) serverName = GetServerName(); if (serverName == "") return(EMPTY);
+   if (!StringLen(serverName)) serverName = GetAccountServer(); if (serverName == "") return(EMPTY);
 
    ArrayResize(sgs, 0);
 
@@ -1766,7 +1766,7 @@ bool SaveSymbolGroups(/*SYMBOL_GROUP*/int sgs[], string serverName="") {
    if (byteSize % SYMBOL_GROUP.size != 0)                                          return(!catch("SaveSymbolGroups(1)  invalid size of sgs[] (not an even SYMBOL_GROUP size, "+ (byteSize % SYMBOL_GROUP.size) +" trailing bytes)", ERR_RUNTIME_ERROR));
    if (byteSize > 32*SYMBOL_GROUP.size)                                            return(!catch("SaveSymbolGroups(2)  invalid number of groups in sgs[] (max 32)", ERR_RUNTIME_ERROR));
    if (serverName == "0")      serverName = "";                      // (string) NULL
-   if (!StringLen(serverName)) serverName = GetServerName(); if (serverName == "") return(false);
+   if (!StringLen(serverName)) serverName = GetAccountServer(); if (serverName == "") return(false);
 
    // "symgroups.raw" muß immer 32 Gruppen enthalten (ggf. undefiniert)
    int sgs.copy[]; ArrayResize(sgs.copy, 0);
@@ -1849,7 +1849,7 @@ bool InsertSymbol(/*SYMBOL*/int symbol[], string serverName="") {
    string name, newName=symbol_Name(symbol);
    if (!StringLen(newName))                                                        return(!catch("InsertSymbol(2)  invalid parameter symbol[], SYMBOL.name = "+ DoubleQuoteStr(newName), ERR_RUNTIME_ERROR));
    if (serverName == "0")      serverName = "";    // (string) NULL
-   if (!StringLen(serverName)) serverName = GetServerName(); if (serverName == "") return(false);
+   if (!StringLen(serverName)) serverName = GetAccountServer(); if (serverName == "") return(false);
 
 
    // (1.1) Symboldatei öffnen und Größe validieren

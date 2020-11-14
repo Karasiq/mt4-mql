@@ -1,17 +1,18 @@
 /**
- * SuperTrend - a support/resistance line defined by an ATR channel
+ * SuperTrend SR - a support/resistance line formed by an ATR channel
  *
  *
- * The upper or lower band of an ATR channel calculated around High and Low of the current bar is used to calculate a rising
- * or falling support/resistance line. It changes direction when:
+ * The upper and lower band of an ATR channel calculated around price High and Low are used to calculate a continuous SR line
+ * (only rising or falling values). The line changes direction when:
  *
- *  (1) the outer ATR channel band crosses the support/resistance line built by the inner ATR channel band and
- *  (2) price crosses a Moving Average in the same direction
+ *  (1) The outer ATR channel band crosses the support/resistance line formed by the inner ATR channel band.
+ *      - and -
+ *  (2) Price crosses a Moving Average in the same direction.
  *
  * The indicator is similar to the HalfTrend indicator which uses a slightly different channel calculation and trend logic.
  *
  * Indicator buffers for iCustom():
- *  • SuperTrend.MODE_MAIN:  main SR values
+ *  • SuperTrend.MODE_MAIN:  main SR line values
  *  • SuperTrend.MODE_TREND: trend direction and length
  *    - trend direction:     positive values denote an uptrend (+1...+n), negative values a downtrend (-1...-n)
  *    - trend length:        the absolute direction value is the length of the trend in bars since the last reversal
@@ -21,13 +22,12 @@
  * @see  http://www.forexfactory.com/showthread.php?t=268038  (Plateman's CCI aka SuperTrend)
  * @see  /mql4/indicators/HalfTrend.mq4
  *
- * Notes: In the above FF links a CCI is used to get the SMA component for averaging price. Here the CCI is replaced and the
- *        SMA is used directly. The defining element for the indicator is the ATR channel, not price or the SMA. Therefore
- *        the original SMA(PRICE_TYPICAL) is replaced by the more simple SMA(PRICE_CLOSE).
+ * Note: The defining element for the indicator is the ATR channel, not price or MA. Therefore the original
+ *       SMA(PRICE_TYPICAL) is replaced by the more simple SMA(PRICE_CLOSE).
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -40,7 +40,7 @@ extern color  Color.Channel        = CLR_NONE;
 extern color  Color.MovingAverage  = CLR_NONE;
 extern string Draw.Type            = "Line* | Dot";
 extern int    Draw.Width           = 3;
-extern int    Max.Values           = 5000;               // max. amount of values to calculate (-1: all)
+extern int    Max.Bars             = 10000;              // max. values to calculate (-1: all available)
 extern string __________________________;
 
 extern string Signal.onTrendChange = "on | off | auto*";
@@ -55,10 +55,10 @@ extern string Signal.SMS.Receiver  = "on | off | auto* | {phone-number}";
 #include <rsfLibs.mqh>
 #include <functions/@Trend.mqh>
 #include <functions/BarOpenEvent.mqh>
-#include <functions/Configure.Signal.mqh>
-#include <functions/Configure.Signal.Mail.mqh>
-#include <functions/Configure.Signal.SMS.mqh>
-#include <functions/Configure.Signal.Sound.mqh>
+#include <functions/ConfigureSignal.mqh>
+#include <functions/ConfigureSignalMail.mqh>
+#include <functions/ConfigureSignalSMS.mqh>
+#include <functions/ConfigureSignalSound.mqh>
 
 #define MODE_MAIN             SuperTrend.MODE_MAIN       // indicator buffer ids
 #define MODE_TREND            SuperTrend.MODE_TREND
@@ -88,8 +88,7 @@ double lowerBand[];                                      // lower channel band: 
 double sma      [];                                      // SMA                 visible
 
 int    maxValues;
-int    drawType      = DRAW_LINE;                        // DRAW_LINE | DRAW_ARROW
-int    drawArrowSize = 1;                                // default symbol size for Draw.Type="dot"
+int    drawType;
 
 string indicatorName;
 string chartLegendLabel;
@@ -144,18 +143,18 @@ int onInit() {
    if (Draw.Width < 0)  return(catch("onInit(4)  Invalid input parameter Draw.Width = "+ Draw.Width, ERR_INVALID_INPUT_PARAMETER));
    if (Draw.Width > 5)  return(catch("onInit(5)  Invalid input parameter Draw.Width = "+ Draw.Width, ERR_INVALID_INPUT_PARAMETER));
 
-   // Max.Values
-   if (Max.Values < -1) return(catch("onInit(6)  Invalid input parameter Max.Values = "+ Max.Values, ERR_INVALID_INPUT_PARAMETER));
-   maxValues = ifInt(Max.Values==-1, INT_MAX, Max.Values);
+   // Max.Bars
+   if (Max.Bars < -1)   return(catch("onInit(6)  Invalid input parameter Max.Bars = "+ Max.Bars, ERR_INVALID_INPUT_PARAMETER));
+   maxValues = ifInt(Max.Bars==-1, INT_MAX, Max.Bars);
 
    // signals
-   if (!Configure.Signal(__NAME(), Signal.onTrendChange, signals))                                              return(last_error);
+   if (!ConfigureSignal(ProgramName(), Signal.onTrendChange, signals))                                        return(last_error);
    if (signals) {
-      if (!Configure.Signal.Sound(Signal.Sound,         signal.sound                                         )) return(last_error);
-      if (!Configure.Signal.Mail (Signal.Mail.Receiver, signal.mail, signal.mail.sender, signal.mail.receiver)) return(last_error);
-      if (!Configure.Signal.SMS  (Signal.SMS.Receiver,  signal.sms,                      signal.sms.receiver )) return(last_error);
+      if (!ConfigureSignalSound(Signal.Sound,         signal.sound                                         )) return(last_error);
+      if (!ConfigureSignalMail (Signal.Mail.Receiver, signal.mail, signal.mail.sender, signal.mail.receiver)) return(last_error);
+      if (!ConfigureSignalSMS  (Signal.SMS.Receiver,  signal.sms,                      signal.sms.receiver )) return(last_error);
       if (signal.sound || signal.mail || signal.sms) {
-         signal.info = "TrendChange="+ StrLeft(ifString(signal.sound, "Sound,", "") + ifString(signal.mail, "Mail,", "") + ifString(signal.sms, "SMS,", ""), -1);
+         signal.info = "TrendChange="+ StrLeft(ifString(signal.sound, "Sound+", "") + ifString(signal.mail, "Mail+", "") + ifString(signal.sms, "SMS+", ""), -1);
       }
       else signals = false;
    }
@@ -170,14 +169,14 @@ int onInit() {
    SetIndexBuffer(MODE_MA,         sma      );           // MA                  visible
 
    // chart legend
-   indicatorName = __NAME() +"("+ ATR.Periods +")";
    if (!IsSuperContext()) {
-      chartLegendLabel = CreateLegendLabel(indicatorName);
-      ObjectRegister(chartLegendLabel);
+      chartLegendLabel = CreateLegendLabel();
+      RegisterObject(chartLegendLabel);
    }
 
-   // names, labels, styles and display options
-   IndicatorShortName(indicatorName);                    // chart context menu
+   // names, labels and display options
+   indicatorName = ProgramName() +"("+ ATR.Periods +")";
+   IndicatorShortName(indicatorName);                    // chart tooltips and context menu
    SetIndexLabel(MODE_MAIN,      indicatorName);         // chart tooltips and "Data" window
    SetIndexLabel(MODE_TREND,     indicatorName +" trend");
    SetIndexLabel(MODE_UPTREND,   NULL);
@@ -195,7 +194,6 @@ int onInit() {
  * @return int - error status
  */
 int onDeinit() {
-   DeleteRegisteredObjects(NULL);
    RepositionLegend();
    return(catch("onDeinit(1)"));
 }
@@ -218,8 +216,8 @@ int onDeinitRecompile() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(main)) return(log("onTick(1)  size(main) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(main)) return(logInfo("onTick(1)  size(main) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
    // reset all buffers before doing a full recalculation
    if (!UnchangedBars) {
@@ -247,7 +245,7 @@ int onTick() {
    // calculate start bar
    int bars     = Min(ChangedBars, maxValues);
    int startBar = Min(bars-1, Bars-Max(ATR.Periods, SMA.Periods));
-   if (startBar < 0) return(catch("onTick(2)", ERR_HISTORY_INSUFFICIENT));
+   if (startBar < 0) return(logInfo("onTick(2)  Tick="+ Tick, ERR_HISTORY_INSUFFICIENT));
 
    // recalculate changed bars
    for (int i=startBar; i >= 0; i--) {
@@ -318,8 +316,9 @@ int onTick() {
 
       // signal trend changes
       if (signals) /*&&*/ if (IsBarOpenEvent()) {
-         if      (trend[1] ==  1) onTrendChange(MODE_UPTREND);
-         else if (trend[1] == -1) onTrendChange(MODE_DOWNTREND);
+         int iTrend = Round(trend[1]);
+         if      (iTrend ==  1) onTrendChange(MODE_UPTREND);
+         else if (iTrend == -1) onTrendChange(MODE_DOWNTREND);
       }
    }
    return(catch("onTick(3)"));
@@ -334,12 +333,12 @@ int onTick() {
  * @return bool - success status
  */
 bool onTrendChange(int trend) {
-   string message="", accountTime="("+ TimeToStr(TimeLocal(), TIME_MINUTES|TIME_SECONDS) +", "+ AccountAlias(ShortAccountCompany(), GetAccountNumber()) +")";
+   string message="", accountTime="("+ TimeToStr(TimeLocal(), TIME_MINUTES|TIME_SECONDS) +", "+ GetAccountAlias() +")";
    int error = 0;
 
    if (trend == MODE_UPTREND) {
       message = indicatorName +" turned up (market: "+ NumberToStr((Bid+Ask)/2, PriceFormat) +")";
-      if (__LOG()) log("onTrendChange(1)  "+ message);
+      if (IsLogInfo()) logInfo("onTrendChange(1)  "+ message);
       message = Symbol() +","+ PeriodDescription(Period()) +": "+ message;
 
       if (signal.sound) error |= !PlaySoundEx(signal.sound.trendChange_up);
@@ -350,7 +349,7 @@ bool onTrendChange(int trend) {
 
    if (trend == MODE_DOWNTREND) {
       message = indicatorName +" turned down (market: "+ NumberToStr((Bid+Ask)/2, PriceFormat) +")";
-      if (__LOG()) log("onTrendChange(2)  "+ message);
+      if (IsLogInfo()) logInfo("onTrendChange(2)  "+ message);
       message = Symbol() +","+ PeriodDescription(Period()) +": "+ message;
 
       if (signal.sound) error |= !PlaySoundEx(signal.sound.trendChange_down);
@@ -365,18 +364,15 @@ bool onTrendChange(int trend) {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
-   IndicatorBuffers(indicator_buffers);
-
-   int draw_type  = ifInt(Draw.Width, drawType, DRAW_NONE);
-   int draw_width = ifInt(drawType==DRAW_ARROW, drawArrowSize, Draw.Width);
+   int draw_type = ifInt(Draw.Width, drawType, DRAW_NONE);
 
    SetIndexStyle(MODE_MAIN,       DRAW_NONE, EMPTY, EMPTY,      CLR_NONE           );
    SetIndexStyle(MODE_TREND,      DRAW_NONE, EMPTY, EMPTY,      CLR_NONE           );
-   SetIndexStyle(MODE_UPTREND,    draw_type, EMPTY, draw_width, Color.UpTrend      ); SetIndexArrow(MODE_UPTREND,   159);
-   SetIndexStyle(MODE_DOWNTREND,  draw_type, EMPTY, draw_width, Color.DownTrend    ); SetIndexArrow(MODE_DOWNTREND, 159);
+   SetIndexStyle(MODE_UPTREND,    draw_type, EMPTY, Draw.Width, Color.UpTrend      ); SetIndexArrow(MODE_UPTREND,   158);
+   SetIndexStyle(MODE_DOWNTREND,  draw_type, EMPTY, Draw.Width, Color.DownTrend    ); SetIndexArrow(MODE_DOWNTREND, 158);
    SetIndexStyle(MODE_UPPER_BAND, DRAW_LINE, EMPTY, EMPTY,      Color.Channel      );
    SetIndexStyle(MODE_LOWER_BAND, DRAW_LINE, EMPTY, EMPTY,      Color.Channel      );
    SetIndexStyle(MODE_MA,         DRAW_LINE, EMPTY, EMPTY,      Color.MovingAverage);
@@ -386,12 +382,12 @@ void SetIndicatorOptions() {
       SetIndexLabel(MODE_LOWER_BAND, NULL);
    }
    else {
-      SetIndexLabel(MODE_UPPER_BAND, __NAME() +" upper band");
-      SetIndexLabel(MODE_LOWER_BAND, __NAME() +" lower band");
+      SetIndexLabel(MODE_UPPER_BAND, ProgramName() +" upper band");
+      SetIndexLabel(MODE_LOWER_BAND, ProgramName() +" lower band");
    }
 
    if (Color.MovingAverage == CLR_NONE) SetIndexLabel(MODE_MA, NULL);
-   else                                 SetIndexLabel(MODE_MA, __NAME() +" SMA("+ SMA.Periods +")");
+   else                                 SetIndexLabel(MODE_MA, ProgramName() +" SMA("+ SMA.Periods +")");
 }
 
 
@@ -401,7 +397,7 @@ void SetIndicatorOptions() {
  * @return bool - success status
  */
 bool StoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.StoreInt   (name +".input.ATR.Periods",          ATR.Periods         );
    Chart.StoreInt   (name +".input.SMA.Periods",          SMA.Periods         );
    Chart.StoreColor (name +".input.Color.UpTrend",        Color.UpTrend       );
@@ -410,7 +406,7 @@ bool StoreInputParameters() {
    Chart.StoreColor (name +".input.Color.MovingAverage",  Color.MovingAverage );
    Chart.StoreString(name +".input.Draw.Type",            Draw.Type           );
    Chart.StoreInt   (name +".input.Draw.Width",           Draw.Width          );
-   Chart.StoreInt   (name +".input.Max.Values",           Max.Values          );
+   Chart.StoreInt   (name +".input.Max.Bars",             Max.Bars            );
    Chart.StoreString(name +".input.Signal.onTrendChange", Signal.onTrendChange);
    Chart.StoreString(name +".input.Signal.Sound",         Signal.Sound        );
    Chart.StoreString(name +".input.Signal.Mail.Receiver", Signal.Mail.Receiver);
@@ -425,7 +421,7 @@ bool StoreInputParameters() {
  * @return bool - success status
  */
 bool RestoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.RestoreInt   (name +".input.ATR.Periods",          ATR.Periods         );
    Chart.RestoreInt   (name +".input.SMA.Periods",          SMA.Periods         );
    Chart.RestoreColor (name +".input.Color.UpTrend",        Color.UpTrend       );
@@ -434,7 +430,7 @@ bool RestoreInputParameters() {
    Chart.RestoreColor (name +".input.Color.MovingAverage",  Color.MovingAverage );
    Chart.RestoreString(name +".input.Draw.Type",            Draw.Type           );
    Chart.RestoreInt   (name +".input.Draw.Width",           Draw.Width          );
-   Chart.RestoreInt   (name +".input.Max.Values",           Max.Values          );
+   Chart.RestoreInt   (name +".input.Max.Bars",             Max.Bars            );
    Chart.RestoreString(name +".input.Signal.onTrendChange", Signal.onTrendChange);
    Chart.RestoreString(name +".input.Signal.Sound",         Signal.Sound        );
    Chart.RestoreString(name +".input.Signal.Mail.Receiver", Signal.Mail.Receiver);
@@ -457,7 +453,7 @@ string InputsToStr() {
                             "Color.MovingAverage=",  ColorToStr(Color.MovingAverage),      ";", NL,
                             "Draw.Type=",            DoubleQuoteStr(Draw.Type),            ";", NL,
                             "Draw.Width=",           Draw.Width,                           ";", NL,
-                            "Max.Values=",           Max.Values,                           ";", NL,
+                            "Max.Bars=",             Max.Bars,                             ";", NL,
                             "Signal.onTrendChange=", DoubleQuoteStr(Signal.onTrendChange), ";", NL,
                             "Signal.Sound=",         DoubleQuoteStr(Signal.Sound),         ";", NL,
                             "Signal.Mail.Receiver=", DoubleQuoteStr(Signal.Mail.Receiver), ";", NL,

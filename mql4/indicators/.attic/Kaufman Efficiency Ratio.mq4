@@ -4,8 +4,8 @@
  * Ratio between the amount price moved in one way (direction) to the amount price moved in any way (volatility).
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -29,8 +29,6 @@ extern int Periods = 32;
 // buffers
 double bufferKER[];
 
-string ind.shortName;
-
 
 /**
  * Initialization
@@ -50,26 +48,15 @@ int onInit() {
    SetIndexBuffer(0, bufferKER);
 
    // data display configuration, names, labels
-   ind.shortName = "Kaufman Efficiency("+ Periods +")  ";
-   IndicatorShortName(ind.shortName);                       // subwindow and context menu
-   SetIndexLabel(0, StrTrim(ind.shortName));                // "Data" window and tooltips
+   string name = "Kaufman Efficiency("+ Periods +")";
+   IndicatorShortName(name +"  ");                          // chart subwindow and context menu
+   SetIndexLabel(0, name);                                  // chart tooltips and "Data" window
    IndicatorDigits(3);
 
    // drawing options and styles
    SetIndicatorOptions();
 
    return(catch("onInit(2)"));
-}
-
-
-/**
- * Deinitialization
- *
- * @return int - error status
- */
-int onDeinit() {
-   DeleteRegisteredObjects(NULL);
-   return(last_error);
 }
 
 
@@ -90,8 +77,8 @@ int onDeinitRecompile() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(bufferKER)) return(log("onTick(1)  size(bufferKER) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(bufferKER)) return(logInfo("onTick(1)  size(bufferKER) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
    // reset all buffers and delete garbage before doing a full recalculation
    if (!UnchangedBars) {
@@ -107,7 +94,7 @@ int onTick() {
 
    // (1) calculate start bar
    int startBar = Min(ChangedBars-1, Bars-Periods-1);
-   if (startBar < 0) return(catch("onTick(2)", ERR_HISTORY_INSUFFICIENT));
+   if (startBar < 0) return(logInfo("onTick(2)  Tick="+ Tick, ERR_HISTORY_INSUFFICIENT));
 
 
    double direction, noise;
@@ -155,7 +142,7 @@ double Volatility(int bar) {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
    IndicatorBuffers(indicator_buffers);
@@ -168,7 +155,7 @@ void SetIndicatorOptions() {
  * @return bool - success status
  */
 bool StoreInputParameters() {
-   Chart.StoreInt(__NAME() +".input.Periods", Periods);
+   Chart.StoreInt(ProgramName() +".input.Periods", Periods);
    return(!catch("StoreInputParameters(1)"));
 }
 
@@ -179,7 +166,7 @@ bool StoreInputParameters() {
  * @return bool - success status
  */
 bool RestoreInputParameters() {
-   Chart.RestoreInt(__NAME() +".input.Periods", Periods);
+   Chart.RestoreInt(ProgramName() +".input.Periods", Periods);
    return(!catch("RestoreInputParameters(1)"));
 }
 

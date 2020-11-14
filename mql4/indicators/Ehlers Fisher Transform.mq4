@@ -1,8 +1,8 @@
 /**
  * Ehlers' Fisher Transform
  *
- * as described in his book "Cybernetic Analysis for Stocks and Futures". Essentially this indicator is a different
- * visualization of a smoothed Stochastic oscillator.
+ * as described in his book "Cybernetic Analysis for Stocks and Futures". This indicator is a different visualization of a
+ * smoothed Stochastic oscillator.
  *
  *
  * Indicator buffers for iCustom():
@@ -17,13 +17,13 @@
  *
  * TODO:
  *    - implement customizable moving averages for Stochastic and Fisher Transform
- *    - implement Max.Values
+ *    - implement Max.Bars
  *    - implement PRICE_* types
  *    - check required run-up period
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -48,7 +48,7 @@ extern int   Histogram.Style.Width = 2;
 
 #property indicator_separate_window
 #property indicator_buffers   4                             // buffers visible in input dialog
-int       allocated_buffers = 6;                            // used buffers
+int       terminal_buffers  = 6;                            // buffers managed by the terminal
 
 double fisherMain      [];                                  // main value:                invisible, displayed in "Data" window
 double fisherSection   [];                                  // direction and length:      invisible
@@ -56,8 +56,6 @@ double fisherUpper     [];                                  // positive histogra
 double fisherLower     [];                                  // negative histogram values: visible
 double rawPrices       [];                                  // used raw prices:           invisible
 double normalizedPrices[];                                  // normalized prices:         invisible
-
-string fisher.name;                                         // indicator name
 
 
 /**
@@ -93,9 +91,9 @@ int onInit() {
 
 
    // (3) data display configuration, names and labels
-   fisher.name = "Fisher Transform("+ Fisher.Periods +")";
-   IndicatorShortName(fisher.name +"  ");                   // subwindow and context menu
-   SetIndexLabel(MODE_MAIN,          fisher.name);          // "Data" window and tooltips
+   string name = "Fisher Transform("+ Fisher.Periods +")";
+   IndicatorShortName(name +"  ");                          // chart subwindow and context menu
+   SetIndexLabel(MODE_MAIN,          name);                 // chart tooltips and "Data" window
    SetIndexLabel(MODE_SECTION,       NULL);
    SetIndexLabel(MODE_UPPER_SECTION, NULL);
    SetIndexLabel(MODE_LOWER_SECTION, NULL);
@@ -133,8 +131,8 @@ int onDeinitRecompile() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(fisherMain)) return(log("onTick(1)  size(fisherMain) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(fisherMain)) return(logInfo("onTick(1)  size(fisherMain) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
    // reset all buffers and delete garbage before doing a full recalculation
    if (!UnchangedBars) {
@@ -161,7 +159,7 @@ int onTick() {
    // (1) calculate start bar
    int maxBar = Bars-Fisher.Periods;
    int startBar = Min(ChangedBars-1, maxBar);
-   if (startBar < 0) return(catch("onTick(2)", ERR_HISTORY_INSUFFICIENT));
+   if (startBar < 0) return(logInfo("onTick(2)  Tick="+ Tick, ERR_HISTORY_INSUFFICIENT));
 
 
    // (2) recalculate invalid prices
@@ -213,10 +211,10 @@ int onTick() {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
-   IndicatorBuffers(allocated_buffers);
+   IndicatorBuffers(terminal_buffers);
 
    int drawType = ifInt(Histogram.Style.Width, DRAW_HISTOGRAM, DRAW_NONE);
 
@@ -233,7 +231,7 @@ void SetIndicatorOptions() {
  * @return bool - success status
  */
 bool StoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.StoreInt   (name +".input.Fisher.Periods",        Fisher.Periods       );
    Chart.StoreColor (name +".input.Histogram.Color.Upper", Histogram.Color.Upper);
    Chart.StoreColor (name +".input.Histogram.Color.Lower", Histogram.Color.Lower);
@@ -248,7 +246,7 @@ bool StoreInputParameters() {
  * @return bool - success status
  */
 bool RestoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.RestoreInt  (name +".input.Fisher.Periods",        Fisher.Periods       );
    Chart.RestoreColor(name +".input.Histogram.Color.Upper", Histogram.Color.Upper);
    Chart.RestoreColor(name +".input.Histogram.Color.Lower", Histogram.Color.Lower);
@@ -263,8 +261,7 @@ bool RestoreInputParameters() {
  * @return string
  */
 string InputsToStr() {
-   return(StringConcatenate("Fisher.Periods=",  Fisher.Periods,                          ";", NL,
-
+   return(StringConcatenate("Fisher.Periods=",        Fisher.Periods,                    ";", NL,
                             "Histogram.Color.Upper=", ColorToStr(Histogram.Color.Upper), ";", NL,
                             "Histogram.Color.Lower=", ColorToStr(Histogram.Color.Lower), ";", NL,
                             "Histogram.Style.Width=", Histogram.Style.Width,             ";")

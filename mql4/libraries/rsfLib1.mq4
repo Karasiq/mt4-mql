@@ -1,9 +1,9 @@
 /**
- * Data types and sizes in C, Win32 (16bit word size) and MQL:
- * ===========================================================
+ * Data types and sizes in C, Win32 and MQL4.0
+ * ===========================================
  *
  * +---------+---------+--------+--------+--------+-----------------+--------------------+----------------------------+----------------------------+----------------+---------------------+----------------+
- * |         |         |        |        |        |                 |           max(hex) |          signed range(dec) |        unsigned range(dec) |       C        |        Win32        |      MQL       |
+ * |         |         |        |        |        |                 |          max (hex) |     signed range (decimal) |   unsigned range (decimal) |       C        |        Win32        |     MQL4.0     |
  * +---------+---------+--------+--------+--------+-----------------+--------------------+----------------------------+----------------------------+----------------+---------------------+----------------+
  * |         |         |        |        |  1 bit |                 |               0x01 |                    0 ... 1 |                    0 ... 1 |                |                     |                |
  * +---------+---------+--------+--------+--------+-----------------+--------------------+----------------------------+----------------------------+----------------+---------------------+----------------+
@@ -15,15 +15,17 @@
  * |         |         |        |        |        |                 |                    |              2.147.483.647 |              4.294.967.295 |                |    WPARAM,LPARAM    | color,datetime |
  * |         |         |        |        |        |                 |                    |                            |                            |                | (handles, pointers) |                |
  * +---------+---------+--------+--------+--------+-----------------+--------------------+----------------------------+----------------------------+----------------+---------------------+----------------+
- * | 1 qword | 2 dword | 4 word | 8 byte | 64 bit |                 | 0xFFFFFFFFFFFFFFFF | -9.223.372.036.854.775.808 |                          0 |     double     |  LONGLONG,DWORDLONG |     double     | double: 53bit mantisse which allows integers of up to 53bit without loss of precision
+ * | 1 qword | 2 dword | 4 word | 8 byte | 64 bit |                 | 0xFFFFFFFFFFFFFFFF | -9.223.372.036.854.775.808 |                          0 |   double (1)   |  LONGLONG,DWORDLONG |   double (1)   |
  * |         |         |        |        |        |                 |                    |  9.223.372.036.854.775.807 | 18.446.744.073.709.551.616 |                |                     |                |
  * +---------+---------+--------+--------+--------+-----------------+--------------------+----------------------------+----------------------------+----------------+---------------------+----------------+
+ *
+ * (1) A double with 53 bit mantisse which allows integers of up to 53 bit without loss of precision.
  */
 #property library
 
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 #include <core/library.mqh>
 #include <stdfunctions.mqh>
 #include <timezones.mqh>
@@ -33,6 +35,7 @@ int __DEINIT_FLAGS__[];
 #include <functions/iBarShiftPrevious.mqh>
 #include <functions/InitializeByteBuffer.mqh>
 #include <functions/iPreviousPeriodTimes.mqh>
+#include <functions/JoinBools.mqh>
 #include <functions/JoinStrings.mqh>
 #include <structs/rsf/OrderExecution.mqh>
 
@@ -76,11 +79,11 @@ bool ArrayAddInt(int &array[], int value) {
 
 
 /**
- * Öffnet eine einzelne Datei im Texteditor.
+ * Load a file into the text editor.
  *
- * @param  string filename - Dateiname
+ * @param  string filename
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool EditFile(string filename) {
    if (!StringLen(filename)) return(!catch("EditFile(1)  invalid parameter filename = "+ DoubleQuoteStr(filename), ERR_INVALID_PARAMETER));
@@ -91,52 +94,60 @@ bool EditFile(string filename) {
 
 
 /**
- * Öffnet eine oder mehrere Dateien im Texteditor.
+ * Load multiple files into the text editor.
  *
- * @param  string &filenames[] - Dateinamen
+ * @param  string &filenames[]
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool EditFiles(string &filenames[]) {
    int size = ArraySize(filenames);
-   if (!size)                       return(!catch("EditFiles(1)  invalid parameter filenames = {}", ERR_INVALID_PARAMETER));
+   if (!size)                       return(!catch("EditFiles(1)  invalid parameter filenames: {}", ERR_INVALID_PARAMETER));
 
    for (int i=0; i < size; i++) {
-      if (!StringLen(filenames[i])) return(!catch("EditFiles(2)  invalid parameter filenames["+ i +"] = "+ DoubleQuoteStr(filenames[i]), ERR_INVALID_PARAMETER));
+      if (!StringLen(filenames[i])) return(!catch("EditFiles(2)  invalid parameter filenames["+ i +"]: "+ DoubleQuoteStr(filenames[i]), ERR_INVALID_PARAMETER));
+      if (IsLogInfo()) logInfo("EditFiles(3)  loading \""+ filenames[i] +"\"");
 
-      // resolve symlinks
-      while (IsSymlinkA(filenames[i])) {
-         string target = GetReparsePointTargetA(filenames[i]);
-         if (!StringLen(target))
-            break;
-         filenames[i] = target;
-         //debug("EditFiles(3)  resolved symlink: "+ target);
+      if (IsFileA(filenames[i])) {
+         // resolve existing symlinks
+         while (IsSymlinkA(filenames[i])) {
+            string target = GetReparsePointTargetA(filenames[i]);
+            if (!StringLen(target))
+               break;
+            filenames[i] = target;
+         }
       }
+      else if (!IsDirectoryA(filenames[i])) {
+         // create directory
+         int pos = Max(StrFindR(filenames[i], "/"), StrFindR(filenames[i], "\\"));
+         if (pos == 0)          return(!catch("EditFiles(4)  invalid parameter filenames["+ i +"]: "+ DoubleQuoteStr(filenames[i]), ERR_INVALID_PARAMETER));
+         if (pos > 0) {
+            string dir = StrLeft(filenames[i], pos);
+            int error = CreateDirectoryA(dir, MKDIR_PARENT);
+            if (IsError(error)) return(!catch("EditFiles(5)  cannot create directory "+ DoubleQuoteStr(dir), ERR_WIN32_ERROR+error));
+         }
+      }
+      else catch("EditFiles(6)  cannot open file "+ DoubleQuoteStr(filenames[i]) +" (is directory)", ERR_FILE_IS_DIRECTORY);
    }
 
-   // prüfen, ob ein Editor konfiguriert ist
-   string section = "System";
-   string key     = "Editor";
-   string editor  = GetGlobalConfigString(section, key);
-
+   // check the editor configuration
+   string editor = GetGlobalConfigString("System", "Editor");
 
    if (StringLen(editor) > 0) {
-      // ja: konfigurierten Editor benutzen
+      // use configured editor
       string cmd = editor +" \""+ JoinStrings(filenames, "\" \"") +"\"";
       int result = WinExec(cmd, SW_SHOWNORMAL);
-      if (result < 32)
-         return(!catch("EditFiles(4)->kernel32::WinExec(cmd=\""+ editor +"\")  "+ ShellExecuteErrorDescription(result), ERR_WIN32_ERROR+result));
+      if (result < 32) return(!catch("EditFiles(7)->kernel32::WinExec(cmd="+ DoubleQuoteStr(editor) +")  "+ ShellExecuteErrorDescription(result), ERR_WIN32_ERROR+result));
    }
    else {
-      // nein: ShellExecute() mit Default-Open-Methode benutzen
+      // use ShellExecute() and the OS default "open" handler
       string sNull;
       for (i=0; i < size; i++) {
          result = ShellExecuteA(NULL, "open", filenames[i], sNull, sNull, SW_SHOWNORMAL);
-         if (result <= 32)
-            return(!catch("EditFiles(5)->shell32::ShellExecuteA(file=\""+ filenames[i] +"\")  "+ ShellExecuteErrorDescription(result), ERR_WIN32_ERROR+result));
+         if (result <= 32) return(!catch("EditFiles(8)->shell32::ShellExecuteA(file="+ DoubleQuoteStr(filenames[i]) +")  "+ ShellExecuteErrorDescription(result), ERR_WIN32_ERROR+result));
       }
    }
-   return(!catch("EditFiles(6)"));
+   return(!catch("EditFiles(9)"));
 }
 
 
@@ -179,7 +190,7 @@ bool GetTimezoneTransitions(datetime serverTime, int &previousTransition[], int 
     *  2 Wechsel:                          1975.04.01 00:00:00     DST_OFFSET      1975.11.01 00:00:00     STD_OFFSET      // Normalzeit -> DST -> Normalzeit
     */
    datetime toDST, toSTD;
-   int i, iMax=2037-1970, y=TimeYearFix(serverTime);
+   int i, iMax=2037-1970, y=TimeYearEx(serverTime);
 
 
    // letzter Wechsel
@@ -348,7 +359,7 @@ bool AquireLock(string mutexName, bool wait) {
          continue;                                                   // retry
       }
       if (IsError(error)) return(!catch("AquireLock(3)  failed to get lock for mutex "+ DoubleQuoteStr(mutexName), error));
-      if (IsStopped())    return(_false(warn("AquireLock(4)  couldn't get lock for mutex "+ DoubleQuoteStr(mutexName) +", stopping...")));
+      if (IsStopped())    return(logWarn("AquireLock(4)  couldn't get lock for mutex "+ DoubleQuoteStr(mutexName) +", stopping..."));
       if (!wait)
          return(false);
 
@@ -357,7 +368,7 @@ bool AquireLock(string mutexName, bool wait) {
       if (duration >= seconds*1000) {
          if (seconds >= 10)
             return(!catch("AquireLock(5)  failed to get lock for mutex "+ DoubleQuoteStr(mutexName) +" after "+ DoubleToStr(duration/1000., 3) +" sec., giving up", ERR_RUNTIME_ERROR));
-         warn("AquireLock(6)  couldn't get lock for mutex "+ DoubleQuoteStr(mutexName) +" after "+ DoubleToStr(duration/1000., 3) +" sec., retrying...");
+         logNotice("AquireLock(6)  couldn't get lock for mutex "+ DoubleQuoteStr(mutexName) +" after "+ DoubleToStr(duration/1000., 3) +" sec., retrying...");
          seconds++;
       }
 
@@ -419,7 +430,7 @@ int __CheckLocks() {
    int error = NO_ERROR;
 
    for (int i=ArraySize(lock.names)-1; i >= 0; i--) {
-      warn("__CheckLocks(1)  unreleased lock found for mutex "+ DoubleQuoteStr(lock.names[i]));
+      logWarn("__CheckLocks(1)  unreleased lock found for mutex "+ DoubleQuoteStr(lock.names[i]));
       if (!ReleaseLock(lock.names[i]))
          error = last_error;
    }
@@ -438,7 +449,7 @@ int __CheckLocks() {
 int GetGmtToFxtTimeOffset(datetime gmtTime) {
    if (gmtTime < 0) return(_EMPTY_VALUE(catch("GetGmtToFxtTimeOffset(1)  invalid parameter gmtTime = "+ gmtTime, ERR_INVALID_PARAMETER)));
 
-   int offset, year=TimeYearFix(gmtTime)-1970;
+   int offset, year=TimeYearEx(gmtTime)-1970;
 
    // FXT
    if      (gmtTime < transitions.FXT[year][TR_TO_DST.gmt]) offset = -transitions.FXT[year][STD_OFFSET];
@@ -506,20 +517,9 @@ int GetServerToGmtTimeOffset(datetime serverTime) { // throws ERR_INVALID_TIMEZO
    // schnelle Rückkehr, wenn der Server unter einer zu GMT festen Zeitzone läuft
    if (lTimezone == "gmt") return(0);
 
-
    if (serverTime < 0) return(_EMPTY_VALUE(catch("GetServerToGmtTimeOffset(1)  invalid parameter serverTime = "+ serverTime, ERR_INVALID_PARAMETER)));
 
-
-   if (lTimezone == "alpari") {
-      if (serverTime < D'2012.04.01 00:00:00') lTimezone = "europe/berlin";
-      else                                     lTimezone = "europe/kiev";
-   }
-   else if (lTimezone == "globalprime") {
-      if (serverTime < D'2015.10.25 00:00:00') lTimezone = "fxt";
-      else                                     lTimezone = "europe/kiev";
-   }
-
-   int offset, year=TimeYearFix(serverTime)-1970;
+   int offset, year=TimeYearEx(serverTime)-1970;
 
    if (lTimezone == "america/new_york") {
       if      (serverTime < transitions.America_New_York[year][TR_TO_DST.local]) offset = transitions.America_New_York[year][STD_OFFSET];
@@ -628,7 +628,6 @@ int GetIniSections(string fileName, string &names[]) {
 }
 
 
-
 /**
  * Gibt den Servernamen des aktuellen History-Verzeichnisses zurück. Der Name ist bei bestehender Verbindung identisch mit
  * dem Rückgabewert von AccountServer(), läßt sich mit dieser Funktion aber auch ohne Verbindung und bei Accountwechsel
@@ -636,13 +635,11 @@ int GetIniSections(string fileName, string &names[]) {
  *
  * @return string - directory name or an empty string in case of errors
  */
-string GetServerName() {
-   // Der Servername wird zwischengespeichert und erst nach UnchangedBars = 0 invalidiert. Bei Accountwechsel zeigen die MQL-
+string GetAccountServer() {
+   // Der Servername wird zwischengespeichert und der Cache bei UnchangedBars = 0 invalidiert. Bei Accountwechsel zeigen die MQL-
    // Accountfunktionen evt. schon auf den neuen Account, das Programm verarbeitet aber noch einen Tick des alten Charts im
    // alten Serververzeichnis. Erst nach UnchangedBars = 0 ist sichergestellt, daß das neue Serververzeichnis aktiv ist.
-   //
-   // @see  analoge Logik in GetServerTimezone()
-   //
+
    static string static.serverName[1];
    static int    static.lastTick;                     // für Erkennung von Mehrfachaufrufen während desselben Ticks
 
@@ -653,24 +650,23 @@ string GetServerName() {
    static.lastTick = tick;
 
    if (!StringLen(static.serverName[0])) {
-      string serverName=AccountServer(), tmpFilename="", fullTmpFilename;
+      string serverName=AccountServer(), tmpFilename="", fullTmpFilename="";
 
       if (!StringLen(serverName)) {
          // create temporary file
-         tmpFilename = "~GetServerName~"+ GetCurrentThreadId() +".tmp";
+         tmpFilename = "~GetAccountServer~"+ GetCurrentThreadId() +".tmp";
          int hFile = FileOpenHistory(tmpFilename, FILE_BIN|FILE_WRITE);
 
          if (hFile < 0) {                             // if the server directory doesn't yet exist or write access was denied
             int error = GetLastError();
-            if (error == ERR_CANNOT_OPEN_FILE) log("GetServerName(1)->FileOpenHistory("+ DoubleQuoteStr(tmpFilename) +")", _int(error, SetLastError(ERS_TERMINAL_NOT_YET_READY)));
-            else                               catch("GetServerName(2)->FileOpenHistory("+ DoubleQuoteStr(tmpFilename) +")", error);
+            if (error == ERR_CANNOT_OPEN_FILE) logNotice("GetAccountServer(1)->FileOpenHistory("+ DoubleQuoteStr(tmpFilename) +")", _int(error, SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+            else                               catch("GetAccountServer(2)->FileOpenHistory("+ DoubleQuoteStr(tmpFilename) +")", error);
             return(EMPTY_STR);
          }
          FileClose(hFile);
 
          // search the created file
          string pattern = GetTerminalDataPathA() +"\\history\\*";
-         //debug("GetServerName(3)  searching "+ DoubleQuoteStr(pattern));
 
          /*WIN32_FIND_DATA*/int wfd[]; InitializeByteBuffer(wfd, WIN32_FIND_DATA.size);
          int hFindDir = FindFirstFileA(pattern, wfd), next = hFindDir;
@@ -688,14 +684,14 @@ string GetServerName() {
             }
             next = FindNextFileA(hFindDir, wfd);
          }
-         if (hFindDir == INVALID_HANDLE_VALUE) return(_EMPTY_STR(catch("GetServerName(4) directory "+ DoubleQuoteStr(pattern) +" not found", ERR_FILE_NOT_FOUND)));
+         if (hFindDir == INVALID_HANDLE_VALUE) return(_EMPTY_STR(catch("GetAccountServer(4) directory "+ DoubleQuoteStr(pattern) +" not found", ERR_FILE_NOT_FOUND)));
 
          FindClose(hFindDir);
          ArrayResize(wfd, 0);
       }
 
-      if (IsError(catch("GetServerName(5)"))) return( EMPTY_STR);
-      if (!StringLen(serverName))             return(_EMPTY_STR(catch("GetServerName(6)  cannot find server directory containing "+ DoubleQuoteStr(tmpFilename), ERR_RUNTIME_ERROR)));
+      if (IsError(catch("GetAccountServer(5)"))) return( EMPTY_STR);
+      if (!StringLen(serverName))                return(_EMPTY_STR(catch("GetAccountServer(6)  cannot find server directory containing "+ DoubleQuoteStr(tmpFilename), ERR_RUNTIME_ERROR)));
 
       static.serverName[0] = serverName;
    }
@@ -818,53 +814,6 @@ int SortTicketsChronological(int &tickets[]) {
 
 
 /**
- * Erzeugt und positioniert ein neues Legendenlabel für den angegebenen Namen. Das erzeugte Label hat keinen Text.
- *
- * @param  string name - Indikatorname
- *
- * @return string - vollständiger Name des erzeugten Labels
- */
-string CreateLegendLabel(string name) {
-   if (IsSuperContext())
-      return("");
-
-   int totalObj = ObjectsTotal(),
-       labelObj = ObjectsTotal(OBJ_LABEL);
-
-   string substrings[0], objName;
-   int legendLabels, maxLegendId, maxYDistance=2;
-
-   for (int i=0; i < totalObj && labelObj > 0; i++) {
-      objName = ObjectName(i);
-      if (ObjectType(objName) == OBJ_LABEL) {
-         if (StrStartsWith(objName, "Legend.")) {
-            legendLabels++;
-            Explode(objName, ".", substrings);
-            maxLegendId  = Max(maxLegendId, StrToInteger(substrings[1]));
-            maxYDistance = Max(maxYDistance, ObjectGet(objName, OBJPROP_YDISTANCE));
-         }
-         labelObj--;
-      }
-   }
-
-   string label = StringConcatenate("Legend.", maxLegendId+1, ".", name);
-   if (ObjectFind(label) >= 0)
-      ObjectDelete(label);
-   if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
-      ObjectSet(label, OBJPROP_CORNER   , CORNER_TOP_LEFT);
-      ObjectSet(label, OBJPROP_XDISTANCE,               5);
-      ObjectSet(label, OBJPROP_YDISTANCE, maxYDistance+19);
-   }
-   else GetLastError();
-   ObjectSetText(label, " ");
-
-   if (!catch("CreateLegendLabel()"))
-      return(label);
-   return("");
-}
-
-
-/**
  * Positioniert die Legende neu (wird nach Entfernen eines Legendenlabels aufgerufen).
  *
  * @return int - Fehlerstatus
@@ -902,7 +851,7 @@ int RepositionLegend() {
          ObjectSet(legends[yDistances[i][1]], OBJPROP_YDISTANCE, 21 + i*19);
       }
    }
-   return(catch("RepositionLegend()"));
+   return(catch("RepositionLegend(1)"));
 }
 
 
@@ -2236,6 +2185,36 @@ double SumDoubles(double values[]) {
 
 
 /**
+ * Convert an array of order tickets to a readable representation.
+ *
+ * @param  int    tickets[]
+ * @param  string separator [optional] - element separator (default: ", ")
+ *
+ * @return string - readable representation or an empty string in case of errors
+ */
+string TicketsToStr(int tickets[], string separator = ", ") {
+   if (ArrayDimension(tickets) != 1) return(_EMPTY_STR(catch("TicketsToStr(1)  illegal dimensions of parameter tickets: "+ ArrayDimension(tickets), ERR_INCOMPATIBLE_ARRAYS)));
+
+   int size = ArraySize(tickets);
+   if (!size) return("{}");
+
+   if (separator == "0")                           // (string) NULL
+      separator = ", ";
+
+   string result, sValue;
+
+   for (int i=0; i < size; i++) {
+      if   (tickets[i] > 0) sValue = StringConcatenate("#", tickets[i]);
+      else if (!tickets[i]) sValue = "(NULL)";
+      else                  sValue = StringConcatenate("(invalid ticket #", tickets[i], ")");
+      result = StringConcatenate(result, separator, sValue);
+   }
+
+   return(StringConcatenate("{", StrSubstr(result, StringLen(separator)), "}"));
+}
+
+
+/**
  * Gibt die lesbare Version eines Zeichenbuffers zurück. <NUL>-Characters (0x00h) werden gestrichelt (…), Control-Characters (< 0x20h)
  * fett (•) dargestellt.
  *
@@ -2589,7 +2568,7 @@ string GetWindowsShortcutTarget(string lnkFilename) {
    bool pointsToFileOrDir  = (dwFlags & 0x00000002 && 1);
 
    if (!pointsToFileOrDir) {
-      if (__LOG()) log("GetWindowsShortcutTarget(8)  shortcut target is not a file or directory: \""+ lnkFilename +"\"");
+      if (IsLogNotice()) logNotice("GetWindowsShortcutTarget(8)  shortcut target is not a file or directory: \""+ lnkFilename +"\"");
       return("");
    }
 
@@ -2697,7 +2676,7 @@ int WinExecWait(string cmdLine, int cmdShow) {
 
    if (result != WAIT_OBJECT_0) {
       if (result == WAIT_FAILED) catch("WinExecWait(2)->kernel32::WaitForSingleObject()", ERR_WIN32_ERROR);
-      else                         log("WinExecWait(3)->kernel32::WaitForSingleObject() => "+ WaitForSingleObjectValueToStr(result));
+      else                         logNotice("WinExecWait(3)->kernel32::WaitForSingleObject() => "+ WaitForSingleObjectValueToStr(result));
    }
 
    CloseHandle(pi_hProcess(pi));
@@ -3500,7 +3479,169 @@ string StringPad(string input, int pad_length, string pad_string=" ", int pad_ty
       return(paddingLeft + input + paddingRight);
    }
 
-   return(_EMPTY_STR(catch("StringPad(2)  illegal parameter pad_type = "+ pad_type, ERR_INVALID_PARAMETER)));
+   return(_EMPTY_STR(catch("StringPad(2)  illegal parameter pad_type: "+ pad_type, ERR_INVALID_PARAMETER)));
+}
+
+
+/**
+ * Convert a boolean array to a readable representation.
+ *
+ * @param  bool   array[]
+ * @param  string separator [optional] - element separator (default: ", ")
+ *
+ * @return string - string representation or an empty string in case of errors
+ */
+string BoolsToStr(bool array[][], string separator = ", ") {
+   return(__BoolsToStr(array, array, separator));
+}
+
+
+/**
+ * Internal helper function working around the compiler's dimension check. Used only by BoolsToStr().
+ */
+string __BoolsToStr(bool values2[][], bool values3[][][], string separator) {
+   if (separator == "0")                              // (string) NULL
+      separator = ", ";
+   string result = "";
+   int dimensions = ArrayDimension(values2);
+   int dim1 = ArrayRange(values2, 0);
+
+   // test for a 1-dimensional array
+   if (dimensions == 1) {
+      if (dim1 == 0)
+         return("{}");
+      return(StringConcatenate("{", JoinBools(values2, separator), "}"));
+   }
+
+   int dim2 = ArrayRange(values2, 1);
+
+   // test for a 2-dimensional array
+   if (dimensions == 2) {
+      string sValues2_X[]; ArrayResize(sValues2_X, dim1);
+      bool    values2_Y[]; ArrayResize( values2_Y, dim2);
+
+      for (int x=0; x < dim1; x++) {
+         for (int y=0; y < dim2; y++) {
+            values2_Y[y] = values2[x][y];
+         }
+         sValues2_X[x] = BoolsToStr(values2_Y, separator);
+      }
+
+      result = StringConcatenate("{", JoinStrings(sValues2_X, separator), "}");
+      ArrayResize(sValues2_X, 0);
+      ArrayResize( values2_Y, 0);
+      return(result);
+   }
+
+   int dim3 = ArrayRange(values3, 2);
+
+   // test for a 3-dimensional array
+   if (dimensions == 3) {
+      string sValues3_X[]; ArrayResize(sValues3_X, dim1);
+      string sValues3_Y[]; ArrayResize(sValues3_Y, dim2);
+      bool    values3_Z[]; ArrayResize( values3_Z, dim3);
+
+      for (x=0; x < dim1; x++) {
+         for (y=0; y < dim2; y++) {
+            for (int z=0; z < dim3; z++) {
+               values3_Z[z] = values3[x][y][z];
+            }
+            sValues3_Y[y] = BoolsToStr(values3_Z, separator);
+         }
+         sValues3_X[x] = StringConcatenate("{", JoinStrings(sValues3_Y, separator), "}");
+      }
+
+      result = StringConcatenate("{", JoinStrings(sValues3_X, separator), "}");
+      ArrayResize(sValues3_X, 0);
+      ArrayResize(sValues3_Y, 0);
+      ArrayResize( values3_Z, 0);
+      return(result);
+   }
+   return(_EMPTY_STR(catch("__BoolsToStr(1)  too many dimensions of parameter array: "+ dimensions, ERR_INCOMPATIBLE_ARRAYS)));
+}
+
+
+/**
+ * Convert a string array to a readable representation.
+ *
+ * @param  string array[]
+ * @param  string separator [optional] - element separator (default: ", ")
+ *
+ * @return string - string representation or an empty string in case of errors
+ */
+string StringsToStr(string array[][], string separator = ", ") {
+   return(__StringsToStr(array, array, separator));
+}
+
+
+/**
+ * Internal helper function working around the compiler's dimension check. Used only by StringsToStr().
+ */
+string __StringsToStr(string values2[][], string values3[][][], string separator) {
+   if (separator == "0")                              // (string) NULL
+      separator = ", ";
+   string result = "";
+   int dimensions = ArrayDimension(values2);
+   int dim1 = ArrayRange(values2, 0);
+
+   // test for a 1-dimensional array
+   if (dimensions == 1) {
+      if (dim1 == 0)
+         return("{}");
+      string copy[]; ArrayResize(copy, 0);
+      ArrayCopy(copy, values2);
+      DoubleQuoteStrings(copy);
+
+      result = StringConcatenate("{", JoinStrings(copy, separator), "}");
+      ArrayResize(copy, 0);
+      return(result);
+   }
+
+   int dim2 = ArrayRange(values2, 1);
+
+   // test for a 2-dimensional array
+   if (dimensions == 2) {
+      string sValues2_X[]; ArrayResize(sValues2_X, dim1);
+      string  values2_Y[]; ArrayResize( values2_Y, dim2);
+
+      for (int x=0; x < dim1; x++) {
+         for (int y=0; y < dim2; y++) {
+            values2_Y[y] = values2[x][y];             // TODO: catch NPE
+         }
+         sValues2_X[x] = StringsToStr(values2_Y, separator);
+      }
+
+      result = StringConcatenate("{", JoinStrings(sValues2_X, separator), "}");
+      ArrayResize(sValues2_X, 0);
+      ArrayResize( values2_Y, 0);
+      return(result);
+   }
+
+   int dim3 = ArrayRange(values3, 2);
+
+   // test for a 3-dimensional array
+   if (dimensions == 3) {
+      string sValues3_X[]; ArrayResize(sValues3_X, dim1);
+      string sValues3_Y[]; ArrayResize(sValues3_Y, dim2);
+      string  values3_Z[]; ArrayResize( values3_Z, dim3);
+
+      for (x=0; x < dim1; x++) {
+         for (y=0; y < dim2; y++) {
+            for (int z=0; z < dim3; z++) {
+               values3_Z[z] = values3[x][y][z];       // TODO: catch NPE
+            }
+            sValues3_Y[y] = StringsToStr(values3_Z, separator);
+         }
+         sValues3_X[x] = StringConcatenate("{", JoinStrings(sValues3_Y, separator), "}");
+      }
+
+      result = StringConcatenate("{", JoinStrings(sValues3_X, separator), "}");
+      ArrayResize(sValues3_X, 0);
+      ArrayResize(sValues3_Y, 0);
+      ArrayResize( values3_Z, 0);
+      return(result);
+   }
+   return(_EMPTY_STR(catch("__StringsToStr(1)  too many dimensions of parameter array: "+ dimensions, ERR_INCOMPATIBLE_ARRAYS)));
 }
 
 
@@ -3556,7 +3697,7 @@ datetime GetSessionStartTime.srv(datetime serverTime) { // throws ERR_INVALID_TI
    if (fxtTime < 0)
       return(_NaT(catch("GetSessionStartTime.srv(1)  illegal result "+ fxtTime +" for timezone offset of "+ (-offset/MINUTES) +" minutes", ERR_RUNTIME_ERROR)));
 
-   int dayOfWeek = TimeDayOfWeekFix(fxtTime);
+   int dayOfWeek = TimeDayOfWeekEx(fxtTime);
 
    if (dayOfWeek==SATURDAY || dayOfWeek==SUNDAY)
       return(_NaT(SetLastError(ERR_MARKET_CLOSED)));
@@ -3741,7 +3882,7 @@ datetime GetPrevSessionStartTime.fxt(datetime fxtTime) {
       return(_NaT(catch("GetPrevSessionStartTime.fxt(2)  illegal result "+ startTime, ERR_RUNTIME_ERROR)));
 
    // Wochenenden berücksichtigen
-   int dow = TimeDayOfWeekFix(startTime);
+   int dow = TimeDayOfWeekEx(startTime);
    if      (dow == SATURDAY) startTime -= 1*DAY;
    else if (dow == SUNDAY  ) startTime -= 2*DAYS;
 
@@ -3781,7 +3922,7 @@ datetime GetSessionStartTime.fxt(datetime fxtTime) { // throws ERR_MARKET_CLOSED
       return(_NaT(catch("GetSessionStartTime.fxt(2)  illegal result "+ startTime, ERR_RUNTIME_ERROR)));
 
    // Wochenenden berücksichtigen
-   int dow = TimeDayOfWeekFix(startTime);
+   int dow = TimeDayOfWeekEx(startTime);
    if (dow == SATURDAY || dow == SUNDAY)
       return(_NaT(SetLastError(ERR_MARKET_CLOSED)));
 
@@ -3818,7 +3959,7 @@ datetime GetNextSessionStartTime.fxt(datetime fxtTime) {
    datetime startTime = fxtTime - TimeHour(fxtTime)*HOURS - TimeMinute(fxtTime)*MINUTES - TimeSeconds(fxtTime) + 1*DAY;
 
    // Wochenenden berücksichtigen
-   int dow = TimeDayOfWeekFix(startTime);
+   int dow = TimeDayOfWeekEx(startTime);
    if      (dow == SATURDAY) startTime += 2*DAYS;
    else if (dow == SUNDAY  ) startTime += 1*DAY;
 
@@ -3930,11 +4071,6 @@ string IntegerToBinaryStr(int integer) {
    }
    return(result);
 }
-
-
-#import "test/testlibrary.ex4"
-   int ex4_GetIntValue(int value);
-#import
 
 
 /**
@@ -4073,9 +4209,6 @@ int Explode(string input, string separator, string &results[], int limit = NULL)
  * @return int - Account-Nummer oder 0, falls ein Fehler auftrat
  */
 int GetAccountNumber() {
-
-   //debug("GetAccountNumber()");
-
    static int tester.result;
    if (tester.result != 0)
       return(tester.result);
@@ -4089,7 +4222,7 @@ int GetAccountNumber() {
 
    if (!account) {                                                   // Titelzeile des Hauptfensters auswerten
       string title = GetWindowText(GetTerminalMainWindow());         // benutzt SendMessage(), nicht nach Tester.Stop() bei VisualMode=On benutzen => Deadlock UI-Thread
-      if (!StringLen(title))     return(_NULL(log("GetAccountNumber(2)->GetWindowText(hWndMain) = \""+ title +"\"", SetLastError(ERS_TERMINAL_NOT_YET_READY))));
+      if (!StringLen(title))     return(_NULL(logInfo("GetAccountNumber(2)->GetWindowText(hWndMain) = \""+ title +"\"", SetLastError(ERS_TERMINAL_NOT_YET_READY))));
 
       int pos = StringFind(title, ":");
       if (pos < 1)               return(_NULL(catch("GetAccountNumber(3)  account number separator not found in top window title \""+ title +"\"", ERR_RUNTIME_ERROR)));
@@ -4143,7 +4276,7 @@ string GetHostName() {
 int GetFxtToGmtTimeOffset(datetime fxtTime) {
    if (fxtTime < 0) return(_EMPTY_VALUE(catch("GetFxtToGmtTimeOffset(1)  invalid parameter fxtTime = "+ fxtTime, ERR_INVALID_PARAMETER)));
 
-   int offset, year=TimeYearFix(fxtTime)-1970;
+   int offset, year=TimeYearEx(fxtTime)-1970;
 
    // FXT
    if      (fxtTime < transitions.FXT[year][TR_TO_DST.local]) offset = transitions.FXT[year][STD_OFFSET];
@@ -4210,20 +4343,9 @@ int GetGmtToServerTimeOffset(datetime gmtTime) { // throws ERR_INVALID_TIMEZONE_
    // schnelle Rückkehr, wenn der Server unter einer zu GMT festen Zeitzone läuft
    if (lTimezone == "gmt") return(0);
 
-
    if (gmtTime < 0) return(_EMPTY_VALUE(catch("GetGmtToServerTimeOffset(1)  invalid parameter gmtTime = "+ gmtTime, ERR_INVALID_PARAMETER)));
 
-
-   if (lTimezone == "alpari") {
-      if (gmtTime < D'2012.04.01 00:00:00') lTimezone = "europe/berlin";
-      else                                  lTimezone = "europe/kiev";
-   }
-   else if (lTimezone == "globalprime") {
-      if (gmtTime < D'2015.10.25 00:00:00') lTimezone = "fxt";
-      else                                  lTimezone = "europe/kiev";
-   }
-
-   int offset, year=TimeYearFix(gmtTime)-1970;
+   int offset, year=TimeYearEx(gmtTime)-1970;
 
    if (lTimezone == "america/new_york") {
       if      (gmtTime < transitions.America_New_York[year][TR_TO_DST.gmt]) offset = -transitions.America_New_York[year][STD_OFFSET];
@@ -4294,47 +4416,50 @@ int GetLocalToGmtTimeOffset() {
 
 
 /**
- * Gibt die Zeitzone des aktuellen MetaTrader-Servers zurück (nach Olson Timezone Database).
+ * Return the current trade server's timezone identifier.
  *
- * @return string - Zeitzonen-Identifier oder Leerstring, falls ein Fehler auftrat
+ * @return string - timezone identifier or an empty string in case of errors
  *
- * @see  http://en.wikipedia.org/wiki/Tz_database
+ * @see    http://en.wikipedia.org/wiki/Tz_database   [Olson Timezone Database]
  */
 string GetServerTimezone() {
-   // Die Timezone-ID wird zwischengespeichert und erst nach UnchangedBars = 0 invalidiert. Bei Accountwechsel zeigen die MQL-
-   // Accountfunktionen evt. schon auf den neuen Account, das Programm verarbeitet aber noch einen Tick des alten Charts im
-   // alten Serververzeichnis. Erst nach UnchangedBars = 0 ist sichergestellt, daß das neue Serververzeichnis mit neuer Zeitzone
-   // aktiv ist.
-   //
-   // @see  analoge Logik in GetServerName()
-   //
-   static string static.timezone[1];
-   static int    static.lastTick;                     // für Erkennung von Mehrfachaufrufen während desselben Ticks
+   // - The resolved timezone can only change when the trade account changes.
+   // - On account change indicators do not perform an init cycle.
+   // - The builtin account functions can't be used to detect an account change. They already return new account data even if
+   //   the program still operates on previous chart data and processes old ticks. On the first tick received for the new
+   //   account UnchangedBars is 0 (zero). This is used to invalidate and refresh a cached timezone id.
+   // - This function is stored in the library to make the cache survive an indicator init cyle.
 
-   // invalidate cache after UnchangedBars == 0 on a new tick
-   int tick = __ExecutionContext[EC.ticks];
-   if (!__ExecutionContext[EC.unchangedBars]) /*&&*/ if (tick != static.lastTick)
-      static.timezone[0] = "";
-   static.lastTick = tick;
+   #define IDX_SERVER   0
+   #define IDX_TIMEZONE 1
 
+   int Tick=__ExecutionContext[EC.ticks], UnchangedBars=__ExecutionContext[EC.unchangedBars];
+   static int lastTick = -1;
+   static string lastResult[2]; // {lastServer, lastTimezone};
 
-   if (!StringLen(static.timezone[0])) {
-      string server = GetServerName(); if (!StringLen(server)) return("");
-
-      // look-up server name
-      string timezone = GetGlobalConfigString("Timezones", server);
-
-      // look-up company name
-      if (!StringLen(timezone))
-         timezone = GetGlobalConfigString("Timezones", StrLeftTo(server, "-"));
-
-      if (!StringLen(timezone))
-         return(_EMPTY_STR(catch("GetServerTimezone(1)  missing timezone configuration for trade server \""+ server +"\"", ERR_INVALID_TIMEZONE_CONFIG)));
-
-      //debug("GetServerTimezone(0)  timezone: "+ timezone);
-      static.timezone[0] = timezone;
+   if (Tick != lastTick) {
+      if (StringLen(lastResult[IDX_TIMEZONE]) > 0 && !UnchangedBars) {
+         string server = GetAccountServer(); if (!StringLen(server)) return("");
+         if (!StrCompare(server, lastResult[IDX_SERVER])) {
+            lastResult[IDX_TIMEZONE] = "";
+         }
+      }
    }
-   return(static.timezone[0]);
+
+   if (!StringLen(lastResult[IDX_TIMEZONE])) {
+      lastResult[IDX_SERVER  ] = GetAccountServer(); if (!StringLen(lastResult[IDX_SERVER])) return("");
+      lastResult[IDX_TIMEZONE] = GetGlobalConfigString("Timezones", lastResult[IDX_SERVER]);
+      if (!StringLen(lastResult[IDX_TIMEZONE])) {
+         lastResult[IDX_TIMEZONE] = GetGlobalConfigString("Timezones", StrLeftTo(lastResult[IDX_SERVER], "-"));
+      }
+      if (!StringLen(lastResult[IDX_TIMEZONE])) {
+         logNotice("GetServerTimezone(1)  missing timezone configuration for server "+ DoubleQuoteStr(lastResult[IDX_SERVER]) +", using default timezone \"FXT\"");
+         lastResult[IDX_TIMEZONE] = "FXT";
+      }
+   }
+
+   lastTick = Tick;
+   return(lastResult[IDX_TIMEZONE]);
 }
 
 
@@ -4423,76 +4548,37 @@ int IncreasePeriod(int period = 0) {
 }
 
 
-string chart.objects[];
+string registeredObjects[];
 
 
 /**
- * Fügt ein Object-Label zu den bei Programmende oder Bedarf automatisch zu entfernenden Chartobjekten hinzu.
+ * Register a chart object for auto-removal on Program::deinit().
  *
- * @param  string label - Object-Label
+ * @param  string label - object label
  *
- * @return int - Anzahl der gespeicherten Label oder -1, falls ein Fehler auftrat
+ * @return int - number of registered objects or -1 in case of errors
  */
-int ObjectRegister(string label) {
-   return(ArrayPushString(chart.objects, label));
+int RegisterObject(string label) {
+   return(ArrayPushString(registeredObjects, label));
 }
 
 
 /**
- * Löscht alle zum automatischen Entfernen registrierten Chartobjekte, die mit dem angegebenen Prefix beginnen, aus dem Chart.
+ * Delete all chart objects registered for auto-removal. Called on Program::deinit().
  *
- * @param  string prefix - Prefix des Labels der zu löschenden Objekte (default: alle Objekte)
- *
- * @return int - Fehlerstatus
+ * @return int - error status
  */
-int DeleteRegisteredObjects(string prefix/*=NULL*/) {
-   int size = ArraySize(chart.objects);
+int DeleteRegisteredObjects() {
+   int size = ArraySize(registeredObjects);
    if (!size) return(NO_ERROR);
 
-   bool filter=false, filtered=false;
-
-   if (StringLen(prefix) > 0)
-      filter = (prefix != "0");                                      // (string) NULL == "0"
-
-   if (filter) {
-      // Filter angegeben: nur die passenden Objekte löschen
-      for (int i=size-1; i >= 0; i--) {                              // wegen ArraySpliceStrings() rückwärts ierieren
-         if (StrStartsWith(chart.objects[i], prefix)) {
-            if (ObjectFind(chart.objects[i]) != -1)
-               if (!ObjectDelete(chart.objects[i])) warn("DeleteRegisteredObjects(1)->ObjectDelete(label="+ DoubleQuoteStr(chart.objects[i]) +")", GetLastError());
-            ArraySpliceStrings(chart.objects, i, 1);
-         }
-      }
+   for (int i=0; i < size; i++) {
+      if (ObjectFind(registeredObjects[i]) != -1)
+         if (!ObjectDelete(registeredObjects[i])) logWarn("DeleteRegisteredObjects(1)->ObjectDelete(label="+ DoubleQuoteStr(registeredObjects[i]) +")", GetLastError());
    }
-   else {
-      // kein Filter angegeben: alle Objekte löschen
-      for (i=0; i < size; i++) {
-         if (ObjectFind(chart.objects[i]) != -1)
-            if (!ObjectDelete(chart.objects[i])) warn("DeleteRegisteredObjects(2)->ObjectDelete(label="+ DoubleQuoteStr(chart.objects[i]) +")", GetLastError());
-      }
-      ArrayResize(chart.objects, 0);
-   }
+   ArrayResize(registeredObjects, 0);
 
-   return(catch("DeleteRegisteredObjects(3)"));
-}
-
-
-/**
- * Löscht ein Chartobjekt, ohne einen Fehler zu melden, falls das Objekt nicht gefunden wurde.
- *
- * @param  string label    - Object-Label
- * @param  string location - Bezeichner für evt. Fehlermeldung
- *
- * @return bool - Erfolgsstatus
- */
-bool ObjectDeleteSilent(string label, string location) {
-   if (ObjectFind(label) == -1)
-      return(true);
-
-   if (ObjectDelete(label))
-      return(true);
-
-   return(!catch("ObjectDeleteSilent()->"+ location));
+   return(catch("DeleteRegisteredObjects(2)"));
 }
 
 
@@ -4709,46 +4795,48 @@ color HSLToRGB(double hsl[3]) {
 
 
 /**
- * Adjust a RGB color using the HSL color model. This model is used by the Windows color picker. The function adjusts
- * existing color values, it does not set new values.
+ * Adjust an RGB color using the HSL color model (same as the Windows color picker).
  *
- * @param  color  rgb              - color to adjust
- * @param  double adjustHue        - the hue can be shifted by +/-360°
- * @param  double adjustSaturation - the saturation can be adjusted from -100% to a positive infinite percentage
- * @param  double adjustLightness  - the lightness can be adjusted from -100% to a positive infinite percentage
+ * @param  color  rgb        - color to adjust
+ * @param  double hue        - shift from -360° to +360°                  (NULL for no change)
+ * @param  double saturation - adjustment from -100% to positive infinite (NULL for no change)
+ * @param  double lightness  - adjustment from -100% to positive infinite (NULL for no change)
  *
  * @return color - adjusted color or -1 (EMPTY) in case of errors
  *
  * Example:
  * --------
- *   ColorAdjust(C'90,128,162', NULL, NULL, 30) => C'119,168,212'          // lightness of the color is increased by 30%
+ *   ModifyColor(C'90,128,162', NULL, NULL, 30) => C'119,168,212'          // lightness of the color is increased by 30%
  */
-color ColorAdjust(color rgb, double adjustHue, double adjustSaturation, double adjustLightness) {
+color ModifyColor(color rgb, double hue, double saturation, double lightness) {
+   if (rgb == CLR_NONE) return(CLR_NONE);
+
    if (rgb >= 0) {
-      if (-360 <= adjustHue && adjustHue <= 360) {
-         if (adjustSaturation >= -100) {                                   // max. reduction is -100%
-            if (adjustLightness >= -100) {                                 // max. reduction is -100%
+      if (-360 <= hue && hue <= 360) {
+         if (saturation >= -100) {                                         // max. reduction is -100%
+            if (lightness >= -100) {                                       // max. reduction is -100%
 
                // convert color to HSL
-               double hsl[]; RGBToHSL(rgb, hsl);
+               double hsl[];
+               RGBToHSL(rgb, hsl);
 
                // adjust hue
-               if (!EQ(adjustHue, 0)) {
-                  hsl[HSL_HUE] += adjustHue/360;
+               if (!EQ(hue, 0)) {
+                  hsl[HSL_HUE] += hue/360;
                   if      (hsl[HSL_HUE] < 0) hsl[HSL_HUE] += 1;            // limit range to 0...1
                   else if (hsl[HSL_HUE] > 1) hsl[HSL_HUE] -= 1;
                }
 
                // adjust saturation
-               if (!EQ(adjustSaturation, 0)) {
-                  hsl[HSL_SATURATION] *= (1 + adjustSaturation/100);
+               if (!EQ(saturation, 0)) {
+                  hsl[HSL_SATURATION] *= (1 + saturation/100);
                   hsl[HSL_SATURATION]  = MathMax(hsl[HSL_SATURATION], 0);  // limit range to 0...1
                   hsl[HSL_SATURATION]  = MathMin(hsl[HSL_SATURATION], 1);
                }
 
                // adjust lightness
-               if (!EQ(adjustLightness, 0)) {
-                  hsl[HSL_LIGHTNESS] *= (1 + adjustLightness/100);
+               if (!EQ(lightness, 0)) {
+                  hsl[HSL_LIGHTNESS] *= (1 + lightness/100);
                   hsl[HSL_LIGHTNESS]  = MathMax(hsl[HSL_LIGHTNESS], 0);    // limit range to 0...1
                   hsl[HSL_LIGHTNESS]  = MathMin(hsl[HSL_LIGHTNESS], 1);
                }
@@ -4757,23 +4845,23 @@ color ColorAdjust(color rgb, double adjustHue, double adjustSaturation, double a
                color result = HSLToRGB(hsl);
                ArrayResize(hsl, 0);
 
-               if (!catch("ColorAdjust(1)"))
+               if (!catch("ModifyColor(1)"))
                   return(result);
 
-            } else catch("ColorAdjust(2)  invalid parameter adjustLightness = "+ NumberToStr(adjustLightness, ".1+"), ERR_INVALID_PARAMETER);
-         } else    catch("ColorAdjust(3)  invalid parameter adjustSaturation = "+ NumberToStr(adjustSaturation, ".1+"), ERR_INVALID_PARAMETER);
-      } else       catch("ColorAdjust(4)  invalid parameter adjustHue = "+ NumberToStr(adjustHue, ".1+"), ERR_INVALID_PARAMETER);
-   } else          catch("ColorAdjust(5)  invalid parameter rgb = "+ rgb, ERR_INVALID_PARAMETER);
+            } else catch("ModifyColor(2)  invalid parameter lightness: "+ NumberToStr(lightness, ".1+"), ERR_INVALID_PARAMETER);
+         } else    catch("ModifyColor(3)  invalid parameter saturation: "+ NumberToStr(saturation, ".1+"), ERR_INVALID_PARAMETER);
+      } else       catch("ModifyColor(4)  invalid parameter hue: "+ NumberToStr(hue, ".1+"), ERR_INVALID_PARAMETER);
+   } else          catch("ModifyColor(5)  invalid parameter rgb: "+ rgb, ERR_INVALID_PARAMETER);
 
    return(EMPTY);
 }
 
 
 /**
- * Konvertiert einen Double mit bis zu 16 Nachkommastellen in einen String.
+ * Convert a double to a string with up to 16 decimal digits.
  *
- * @param  double value  - zu konvertierender Wert
- * @param  int    digits - Anzahl von Nachkommastellen
+ * @param  double value  - value
+ * @param  int    digits - number of decimals
  *
  * @return string
  */
@@ -4878,23 +4966,23 @@ int Order.HandleError(string message, int error, int filter, int oe[], bool refr
       filter |= F_ERS_EXECUTION_STOPPING;
 
    // filter the specified errors and log them
-   if (error==ERR_CONCURRENT_MODIFICATION  && filter & F_ERR_CONCURRENT_MODIFICATION ) return( log(message, error));
-   if (error==ERS_EXECUTION_STOPPING       && filter & F_ERS_EXECUTION_STOPPING      ) return( log(message, error));
-   if (error==ERS_HISTORY_UPDATE           && filter & F_ERS_HISTORY_UPDATE          ) return( log(message, error));
-   if (error==ERR_INVALID_PARAMETER        && filter & F_ERR_INVALID_PARAMETER       ) return( log(message, error));
-   if (error==ERR_INVALID_STOP             && filter & F_ERR_INVALID_STOP            ) return( log(message, error));
-   if (error==ERR_INVALID_TICKET           && filter & F_ERR_INVALID_TICKET          ) return( log(message, error));
-   if (error==ERR_INVALID_TRADE_PARAMETERS && filter & F_ERR_INVALID_TRADE_PARAMETERS) return( log(message, error));
-   if (error==ERR_MARKET_CLOSED            && filter & F_ERR_MARKET_CLOSED           ) return( log(message, error));
-   if (error==ERR_NO_CONNECTION            && filter & F_ERR_NO_CONNECTION           ) return(warn(message, error));
-   if (error==ERR_NO_RESULT                && filter & F_ERR_NO_RESULT               ) return( log(message, error));
-   if (error==ERR_OFF_QUOTES               && filter & F_ERR_OFF_QUOTES              ) return( log(message, error));
-   if (error==ERR_ORDER_CHANGED            && filter & F_ERR_ORDER_CHANGED           ) return( log(message, error));
-   if (error==ERR_SERIES_NOT_AVAILABLE     && filter & F_ERR_SERIES_NOT_AVAILABLE    ) return( log(message, error));
-   if (error==ERS_TERMINAL_NOT_YET_READY   && filter & F_ERS_TERMINAL_NOT_YET_READY  ) return( log(message, error));
-   if (error==ERR_TRADE_DISABLED           && filter & F_ERR_TRADE_DISABLED          ) return(warn(message, error));
-   if (error==ERR_TRADE_MODIFY_DENIED      && filter & F_ERR_TRADE_MODIFY_DENIED     ) return( log(message, error));
-   if (error==ERR_TRADESERVER_GONE         && filter & F_ERR_TRADESERVER_GONE        ) return(warn(message, error));
+   if (error==ERR_CONCURRENT_MODIFICATION  && filter & F_ERR_CONCURRENT_MODIFICATION ) return(logInfo(message, error));
+   if (error==ERS_EXECUTION_STOPPING       && filter & F_ERS_EXECUTION_STOPPING      ) return(logInfo(message, error));
+   if (error==ERS_HISTORY_UPDATE           && filter & F_ERS_HISTORY_UPDATE          ) return(logInfo(message, error));
+   if (error==ERR_INVALID_PARAMETER        && filter & F_ERR_INVALID_PARAMETER       ) return(logInfo(message, error));
+   if (error==ERR_INVALID_STOP             && filter & F_ERR_INVALID_STOP            ) return(logInfo(message, error));
+   if (error==ERR_INVALID_TICKET           && filter & F_ERR_INVALID_TICKET          ) return(logInfo(message, error));
+   if (error==ERR_INVALID_TRADE_PARAMETERS && filter & F_ERR_INVALID_TRADE_PARAMETERS) return(logInfo(message, error));
+   if (error==ERR_MARKET_CLOSED            && filter & F_ERR_MARKET_CLOSED           ) return(logInfo(message, error));
+   if (error==ERR_NO_CONNECTION            && filter & F_ERR_NO_CONNECTION           ) return(logWarn(message, error));
+   if (error==ERR_NO_RESULT                && filter & F_ERR_NO_RESULT               ) return(logInfo(message, error));
+   if (error==ERR_OFF_QUOTES               && filter & F_ERR_OFF_QUOTES              ) return(logInfo(message, error));
+   if (error==ERR_ORDER_CHANGED            && filter & F_ERR_ORDER_CHANGED           ) return(logInfo(message, error));
+   if (error==ERR_SERIES_NOT_AVAILABLE     && filter & F_ERR_SERIES_NOT_AVAILABLE    ) return(logInfo(message, error));
+   if (error==ERS_TERMINAL_NOT_YET_READY   && filter & F_ERS_TERMINAL_NOT_YET_READY  ) return(logInfo(message, error));
+   if (error==ERR_TRADE_DISABLED           && filter & F_ERR_TRADE_DISABLED          ) return(logWarn(message, error));
+   if (error==ERR_TRADE_MODIFY_DENIED      && filter & F_ERR_TRADE_MODIFY_DENIED     ) return(logInfo(message, error));
+   if (error==ERR_TRADESERVER_GONE         && filter & F_ERR_TRADESERVER_GONE        ) return(logWarn(message, error));
 
    // trigger a runtime error for everything else
    return(catch(message, error));
@@ -4913,11 +5001,12 @@ string Order.TempErrorMsg(int oe[], int errors) {
    // temporary error after 0.345 s and 1 requote, retrying...
 
    string message = "temporary error";
-   if (!This.IsTesting()) message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
 
-   int requotes = oe.Requotes(oe);
-   message = message +" and "+ requotes +" requote" + Pluralize(requotes);
-
+   if (!This.IsTesting()) {
+      message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
+      int requotes = oe.Requotes(oe);
+      if (requotes > 0) message = message +" and "+ requotes +" requote" + Pluralize(requotes);
+   }
    return(message +", retrying... ("+ errors +")");
 }
 
@@ -5027,7 +5116,7 @@ int OrderSendEx(string symbol/*=NULL*/, int type, double lots, double price, dou
       if (IsStopped()) return(!Order.HandleError("OrderSendEx(17)  "+ OrderSendEx.ErrorMsg(oe), ERS_EXECUTION_STOPPING, oeFlags, oe));
 
       if (IsTradeContextBusy()) {
-         if (__LOG()) log("OrderSendEx(18)  trade context busy, retrying...");
+         if (IsLogInfo()) logInfo("OrderSendEx(18)  trade context busy, retrying...");
          Sleep(300);
          continue;
       }
@@ -5071,7 +5160,7 @@ int OrderSendEx(string symbol/*=NULL*/, int type, double lots, double price, dou
             else                      slippage = 0;
          oe.setSlippage(oe, NormalizeDouble(slippage/pips, digits & 1));         // total slippage after requotes in pip
 
-         if (__LOG()) log("OrderSendEx(21)  "+ OrderSendEx.SuccessMsg(oe));
+         if (IsLogInfo()) logInfo("OrderSendEx(21)  "+ OrderSendEx.SuccessMsg(oe));
 
          if (IsTesting()) {
             if (type <= OP_SELL) {
@@ -5096,7 +5185,7 @@ int OrderSendEx(string symbol/*=NULL*/, int type, double lots, double price, dou
 
       switch (error) {
          case ERR_TRADE_CONTEXT_BUSY:
-            if (__LOG()) log("OrderSendEx(24)  trade context busy, retrying...");
+            if (IsLogInfo()) logInfo("OrderSendEx(24)  trade context busy, retrying...");
             Sleep(300);
             continue;
 
@@ -5107,7 +5196,7 @@ int OrderSendEx(string symbol/*=NULL*/, int type, double lots, double price, dou
          case ERR_OFF_QUOTES:
             tempErrors++;
             if (tempErrors > 5) break;
-            warn("OrderSendEx(25)  "+ OrderSendEx.TempErrorMsg(oe, tempErrors), error);
+            logWarn("OrderSendEx(25)  "+ OrderSendEx.TempErrorMsg(oe, tempErrors), error);
             continue;
 
          case ERR_REQUOTE:
@@ -5118,7 +5207,7 @@ int OrderSendEx(string symbol/*=NULL*/, int type, double lots, double price, dou
             continue;                                                            // no delay after ERR_REQUOTE
 
          case NO_ERROR:
-            if (__LOG()) log("OrderSendEx(26)  no error returned => ERR_RUNTIME_ERROR");
+            if (IsLogInfo()) logInfo("OrderSendEx(26)  no error returned => ERR_RUNTIME_ERROR");
             error = oe.setError(oe, ERR_RUNTIME_ERROR);
             break;
       }
@@ -5140,28 +5229,29 @@ string OrderSendEx.SuccessMsg(/*ORDER_EXECUTION*/int oe[]) {
 
    int    digits      = oe.Digits(oe);
    int    pipDigits   = digits & (~1);
-   string priceFormat = StringConcatenate(".", pipDigits, ifString(digits==pipDigits, "", "'"));
+   string priceFormat = "."+ pipDigits + ifString(digits==pipDigits, "", "'");
 
    string sType       = OperationTypeDescription(oe.Type(oe));
    string sLots       = NumberToStr(oe.Lots(oe), ".+");
    string sComment    = oe.Comment(oe);
-      if (StringLen(sComment) > 0) sComment = StringConcatenate(" \"", sComment, "\"");
+      if (StringLen(sComment) > 0) sComment = " \""+ sComment +"\"";
    string sPrice      = NumberToStr(oe.OpenPrice(oe), priceFormat);
    string sSlippage   = "";
       double slippage = oe.Slippage(oe);
-      if (!EQ(slippage, 0)) { sPrice    = StringConcatenate(sPrice, " (instead of ", NumberToStr(ifDouble(oe.Type(oe)==OP_SELL, oe.Bid(oe), oe.Ask(oe)), priceFormat), ")");
-         if (slippage > 0)    sSlippage = StringConcatenate(" (", DoubleToStr( slippage, digits & 1), " pip slippage)");
-         else                 sSlippage = StringConcatenate(" (", DoubleToStr(-slippage, digits & 1), " pip positive slippage)");
+      if (!EQ(slippage, 0)) { sPrice    = sPrice +" (instead of "+ NumberToStr(ifDouble(oe.Type(oe)==OP_SELL, oe.Bid(oe), oe.Ask(oe)), priceFormat) +")";
+         if (slippage > 0)    sSlippage = " ("+ DoubleToStr(slippage, digits & 1) +" pip slippage)";
+         else                 sSlippage = " ("+ DoubleToStr(-slippage, digits & 1) +" pip positive slippage)";
       }
-   string message = StringConcatenate("opened #", oe.Ticket(oe), " ", sType, " ", sLots, " ", oe.Symbol(oe), sComment , " at ", sPrice);
-   if (!EQ(oe.StopLoss  (oe), 0)) message = StringConcatenate(message, ", sl=", NumberToStr(oe.StopLoss  (oe), priceFormat));
-   if (!EQ(oe.TakeProfit(oe), 0)) message = StringConcatenate(message, ", tp=", NumberToStr(oe.TakeProfit(oe), priceFormat));
-   if (!This.IsTesting())         message = StringConcatenate(message, " after ", DoubleToStr(oe.Duration(oe)/1000., 3), " s");
+   string message = "opened #"+ oe.Ticket(oe) +" "+ sType +" "+ sLots +" "+ oe.Symbol(oe) + sComment +" at "+ sPrice;
+   if (!EQ(oe.StopLoss  (oe), 0)) message = message +", sl="+ NumberToStr(oe.StopLoss(oe), priceFormat);
+   if (!EQ(oe.TakeProfit(oe), 0)) message = message +", tp="+ NumberToStr(oe.TakeProfit(oe), priceFormat);
 
-   int requotes = oe.Requotes(oe);
-   message = StringConcatenate(message, " and ", requotes, " requote", Pluralize(requotes));
-
-   return(StringConcatenate(message, sSlippage));
+   if (!This.IsTesting()) {
+      message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
+      int requotes = oe.Requotes(oe);
+      if (requotes > 0) message = message +" and "+ requotes +" requote"+ Pluralize(requotes);
+   }
+   return(message + sSlippage);
 }
 
 
@@ -5177,11 +5267,11 @@ string OrderSendEx.TempErrorMsg(int oe[], int errors) {
    if (oe.Error(oe) != ERR_OFF_QUOTES)
       return(Order.TempErrorMsg(oe, errors));
 
-   // temporary error while trying to Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8 (market Bid/Ask) after 0.345 s and 1 requote, retrying... (1)
+   // temporary error while trying to Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8 (market: Bid/Ask) after 0.345 s and 1 requote, retrying... (1)
 
    int    digits      = oe.Digits(oe);
    int    pipDigits   = digits & (~1);
-   string priceFormat = StringConcatenate(".", pipDigits, ifString(digits==pipDigits, "", "'"));
+   string priceFormat = "."+ pipDigits + ifString(digits==pipDigits, "", "'");
 
    string sType    = OperationTypeDescription(oe.Type(oe));
    string sLots    = NumberToStr(oe.Lots(oe), ".+");
@@ -5190,15 +5280,16 @@ string OrderSendEx.TempErrorMsg(int oe[], int errors) {
    string sBid     = NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat);
    string sAsk     = NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat);
    string sComment = oe.Comment(oe);
-      if (StringLen(sComment) > 0) sComment = StringConcatenate(" \"", sComment, "\"");
+      if (StringLen(sComment) > 0) sComment = " \""+ sComment +"\"";
 
-   string message = StringConcatenate("temporary error while trying to ", sType, " ", sLots, " ", oe.Symbol(oe), sComment, " at ", sPrice, " (market ", sBid, "/", sAsk, ")");
-   if (!This.IsTesting()) message = StringConcatenate(message, " after ", DoubleToStr(oe.Duration(oe)/1000., 3), " s");
+   string message = "temporary error while trying to "+ sType +" "+ sLots +" "+ oe.Symbol(oe) + sComment +" at "+ sPrice +" (market: "+ sBid +"/"+ sAsk +")";
 
-   int requotes = oe.Requotes(oe);
-   message = StringConcatenate(message, " and ", requotes, " requote", Pluralize(requotes));
-
-   return(StringConcatenate(message, ", retrying... ("+ errors +")"));
+   if (!This.IsTesting()) {
+      message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
+      int requotes = oe.Requotes(oe);
+      if (requotes > 0) message = message +" and "+ requotes +" requote"+ Pluralize(requotes);
+   }
+   return(message +", retrying... ("+ errors +")");
 }
 
 
@@ -5210,31 +5301,32 @@ string OrderSendEx.TempErrorMsg(int oe[], int errors) {
  * @return string
  */
 string OrderSendEx.ErrorMsg(/*ORDER_EXECUTION*/int oe[]) {
-   // error while trying to Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8, sl=1.5500'0, tp=1.5600'0 (market Bid/Ask) after 0.345 s and 1 requote
+   // error while trying to Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8, sl=1.5500'0, tp=1.5600'0 (market: Bid/Ask) after 0.345 s and 1 requote
 
    int    digits      = oe.Digits(oe);
    int    pipDigits   = digits & (~1);
-   string priceFormat = StringConcatenate(".", pipDigits, ifString(digits==pipDigits, "", "'"));
+   string priceFormat = "."+ pipDigits + ifString(digits==pipDigits, "", "'");
 
    string sType    = OperationTypeDescription(oe.Type(oe));
    string sLots    = NumberToStr(oe.Lots(oe), ".+");
    string symbol   = oe.Symbol(oe);
    string sComment = oe.Comment(oe);
-      if (StringLen(sComment) > 0) sComment = StringConcatenate(" \"", sComment, "\"");
+      if (StringLen(sComment) > 0) sComment = " \""+ sComment +"\"";
    string sPrice   = NumberToStr(oe.OpenPrice(oe), priceFormat);
    string sBid     = NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat);
    string sAsk     = NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat);
 
-   string message = StringConcatenate("error while trying to ", sType, " ", sLots, " ", symbol, sComment, " at ", sPrice);
+   string message = "error while trying to "+ sType +" "+ sLots +" "+ symbol + sComment +" at "+ sPrice;
 
-   if (!EQ(oe.StopLoss  (oe), 0))        message = StringConcatenate(message, ", sl=", NumberToStr(oe.StopLoss(oe), priceFormat));
-   if (!EQ(oe.TakeProfit(oe), 0))        message = StringConcatenate(message, ", tp=", NumberToStr(oe.TakeProfit(oe), priceFormat));
-   if (oe.Error(oe) == ERR_INVALID_STOP) message = StringConcatenate(message, ", stop distance=", NumberToStr(oe.StopDistance(oe), ".+"), " pip");
-                                         message = StringConcatenate(message, " (market ", sBid, "/", sAsk, ")");
-   if (!This.IsTesting())                message = StringConcatenate(message, " after ", DoubleToStr(oe.Duration(oe)/1000., 3), " s");
-
-   int requotes = oe.Requotes(oe);
-   if (requotes > 0) message = StringConcatenate(message, " and ", requotes, " requote", Pluralize(requotes));
+   if (!EQ(oe.StopLoss  (oe), 0))        message = message +", sl="+ NumberToStr(oe.StopLoss(oe), priceFormat);
+   if (!EQ(oe.TakeProfit(oe), 0))        message = message +", tp="+ NumberToStr(oe.TakeProfit(oe), priceFormat);
+   if (oe.Error(oe) == ERR_INVALID_STOP) message = message +", stop distance="+ NumberToStr(oe.StopDistance(oe), ".+") +" pip";
+                                         message = message +" (market: "+ sBid +"/"+ sAsk +")";
+   if (!This.IsTesting()) {
+      message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
+      int requotes = oe.Requotes(oe);
+      if (requotes > 0) message = message +" and "+ requotes +" requote"+ Pluralize(requotes);
+   }
    return(message);
 }
 
@@ -5322,7 +5414,7 @@ bool OrderModifyEx(int ticket, double openPrice, double stopLoss, double takePro
    double prevOpenPrice=OrderOpenPrice(), prevStopLoss=OrderStopLoss(), prevTakeProfit=OrderTakeProfit();
 
    if (EQ(openPrice, prevOpenPrice, digits)) /*&&*/ if (EQ(stopLoss, prevStopLoss, digits)) /*&&*/ if (EQ(takeProfit, prevTakeProfit, digits)) {
-      warn("OrderModifyEx(24)  nothing to modify for ticket #"+ ticket);
+      logWarn("OrderModifyEx(24)  nothing to modify for ticket #"+ ticket);
       return(_false(Order.HandleError("OrderModifyEx(25)", ERR_NO_RESULT, oeFlags, oe), OrderPop("OrderModifyEx(26)")));
    }
    int  tempErrors, startTime = GetTickCount();
@@ -5334,7 +5426,7 @@ bool OrderModifyEx(int ticket, double openPrice, double stopLoss, double takePro
       if (IsStopped()) return(_false(Order.HandleError("OrderModifyEx(27)  "+ OrderModifyEx.ErrorMsg(oe, prevOpenPrice, prevStopLoss, prevTakeProfit), ERS_EXECUTION_STOPPING, oeFlags, oe), OrderPop("OrderModifyEx(28)")));
 
       if (IsTradeContextBusy()) {
-         if (__LOG()) log("OrderModifyEx(29)  trade context busy, retrying...");
+         if (IsLogInfo()) logInfo("OrderModifyEx(29)  trade context busy, retrying...");
          Sleep(300);
          continue;
       }
@@ -5362,7 +5454,7 @@ bool OrderModifyEx(int ticket, double openPrice, double stopLoss, double takePro
          oe.setCommission(oe, ifDouble(isPendingOrder, 0, OrderCommission()));
          oe.setProfit    (oe, ifDouble(isPendingOrder, 0, OrderProfit()));
 
-         if (__LOG()) log("OrderModifyEx(32)  "+ OrderModifyEx.SuccessMsg(oe, prevOpenPrice, prevStopLoss, prevTakeProfit));
+         if (IsLogInfo()) logInfo("OrderModifyEx(32)  "+ OrderModifyEx.SuccessMsg(oe, prevOpenPrice, prevStopLoss, prevTakeProfit));
          if (!IsTesting()) PlaySoundEx("OrderModified.wav");                           // regular exit (NO_ERROR)
          return(!_bool(Order.HandleError("OrderModifyEx(33)", GetLastError(), oeFlags, oe), OrderPop("OrderModifyEx(34)")));
       }
@@ -5371,7 +5463,7 @@ bool OrderModifyEx(int ticket, double openPrice, double stopLoss, double takePro
 
       switch (error) {
          case ERR_TRADE_CONTEXT_BUSY:
-            if (__LOG()) log("OrderModifyEx(35)  trade context busy, retrying...");
+            if (IsLogInfo()) logInfo("OrderModifyEx(35)  trade context busy, retrying...");
             Sleep(300);
             continue;
 
@@ -5379,17 +5471,17 @@ bool OrderModifyEx(int ticket, double openPrice, double stopLoss, double takePro
          case ERR_TRADE_TIMEOUT:
             tempErrors++;
             if (tempErrors > 5) break;
-            warn("OrderModifyEx(36)  "+ Order.TempErrorMsg(oe, tempErrors), error);
+            logWarn("OrderModifyEx(36)  "+ Order.TempErrorMsg(oe, tempErrors), error);
             continue;
 
          // map terminal generated errors
          case ERR_INVALID_TICKET:                // unknown ticket or not open pending order anymore (client-side)
-            if (__LOG()) log("OrderModifyEx(37)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
+            if (IsLogInfo()) logInfo("OrderModifyEx(37)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
             error = ERR_INVALID_TRADE_PARAMETERS;
             break;
 
          case NO_ERROR:
-            if (__LOG()) log("OrderModifyEx(38)  no error returned => ERR_RUNTIME_ERROR");
+            if (IsLogNotice()) logNotice("OrderModifyEx(38)  no error returned => ERR_RUNTIME_ERROR");
             error = ERR_RUNTIME_ERROR;
             break;
       }
@@ -5447,7 +5539,7 @@ string OrderModifyEx.SuccessMsg(int oe[], double prevOpenPrice, double prevStopL
  * @return string
  */
 string OrderModifyEx.ErrorMsg(int oe[], double prevOpenPrice, double prevStopLoss, double prevTakeProfit) {
-   // error while trying to modify #1 Stop Buy 0.5 GBPUSD "SR.12345.+2" at 1.5524'8[ => 1.5520'0][, sl=1.5450'0 => 1.5455'0][, tp=1.5520'0 => 1.5530'0][, stop distance=5 pip] (market Bid/Ask) after 0.345 s
+   // error while trying to modify #1 Stop Buy 0.5 GBPUSD "SR.12345.+2" at 1.5524'8[ => 1.5520'0][, sl=1.5450'0 => 1.5455'0][, tp=1.5520'0 => 1.5530'0][, stop distance=5 pip] (market: Bid/Ask) after 0.345 s
 
    int    digits      = oe.Digits(oe);
    int    pipDigits   = digits & (~1);
@@ -5457,7 +5549,7 @@ string OrderModifyEx.ErrorMsg(int oe[], double prevOpenPrice, double prevStopLos
    string symbol      = oe.Symbol(oe);
    string comment     = oe.Comment(oe);
       if (StringLen(comment) > 0) comment = " \""+ comment +"\"";
-   string sMarket     = "(market "+ NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat) +"/"+ NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat) +")";
+   string sMarket     = "(market: "+ NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat) +"/"+ NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat) +")";
 
    double openPrice=oe.OpenPrice(oe), stopLoss=oe.StopLoss(oe), takeProfit=oe.TakeProfit(oe);
 
@@ -5580,7 +5672,7 @@ bool OrderCloseEx(int ticket, double lots, double slippage, color markerColor, i
       if (IsStopped()) return(_false(Order.HandleError("OrderCloseEx(19)  "+ OrderCloseEx.ErrorMsg(oe), ERS_EXECUTION_STOPPING, oeFlags, oe), OrderPop("OrderCloseEx(20)")));
 
       if (IsTradeContextBusy()) {
-         if (__LOG()) log("OrderCloseEx(21)  trade context busy, retrying...");
+         if (IsLogInfo()) logInfo("OrderCloseEx(21)  trade context busy, retrying...");
          Sleep(300);
          continue;
       }
@@ -5617,7 +5709,7 @@ bool OrderCloseEx(int ticket, double lots, double slippage, color markerColor, i
          // find the remaining position
          if (!EQ(lots, openLots, 2)) {
             string sValue1, sValue2;
-            if (IsTesting()) /*&&*/ if (!StrStartsWithI(OrderComment(), "to #")) {  // fall-back to server behaviour if current terminal builds fixed the comment issue
+            if (IsTesting()) /*&&*/ if (!StrStartsWithI(OrderComment(), "to #")) {  // fall-back to server behavior if current terminal builds fixed the comment issue
                // the Tester overwrites the comment with "partial close" instead of "to #2"
                if (OrderComment() != "partial close") return(_false(Order.HandleError("OrderCloseEx(23)  unexpected order comment after partial close of #"+ ticket +" ("+ NumberToStr(lots, ".+") +" of "+ NumberToStr(openLots, ".+") +" lots) = \""+ OrderComment() +"\"", ERR_RUNTIME_ERROR, oeFlags, oe), OrderPop("OrderCloseEx(24)")));
                sValue1 = "split from #"+ ticket;
@@ -5651,7 +5743,7 @@ bool OrderCloseEx(int ticket, double lots, double slippage, color markerColor, i
             oe.setRemainingTicket(oe, remainder);
             oe.setRemainingLots  (oe, openLots-lots);
          }
-         if (__LOG()) log("OrderCloseEx(36)  "+ OrderCloseEx.SuccessMsg(oe));
+         if (IsLogInfo()) logInfo("OrderCloseEx(36)  "+ OrderCloseEx.SuccessMsg(oe));
 
          if (!IsTesting())                                    PlaySoundEx(ifString(requotes, "OrderRequote.wav", "OrderOk.wav"));
          else if (__ExecutionContext[EC.extReporting] != 0) Test_onPositionClose(__ExecutionContext, ticket, OrderClosePrice(), OrderCloseTime(), OrderSwap(), OrderProfit());
@@ -5663,7 +5755,7 @@ bool OrderCloseEx(int ticket, double lots, double slippage, color markerColor, i
 
       switch (error) {
          case ERR_TRADE_CONTEXT_BUSY:
-            if (__LOG()) log("OrderCloseEx(39)  trade context busy, retrying...");
+            if (IsLogInfo()) logInfo("OrderCloseEx(39)  trade context busy, retrying...");
             Sleep(300);
             continue;
 
@@ -5674,7 +5766,7 @@ bool OrderCloseEx(int ticket, double lots, double slippage, color markerColor, i
          case ERR_OFF_QUOTES:
             tempErrors++;
             if (tempErrors > 5) break;
-            warn("OrderCloseEx(40)  "+ Order.TempErrorMsg(oe, tempErrors), error);
+            logWarn("OrderCloseEx(40)  "+ Order.TempErrorMsg(oe, tempErrors), error);
             continue;
 
          case ERR_REQUOTE:
@@ -5685,12 +5777,12 @@ bool OrderCloseEx(int ticket, double lots, double slippage, color markerColor, i
 
          // map terminal generated errors
          case ERR_INVALID_TICKET:                        // unknown ticket or not an open position anymore (client-side)      ! not yet encountered
-            if (__LOG()) log("OrderCloseEx(41)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
+            if (IsLogInfo()) logInfo("OrderCloseEx(41)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
             error = ERR_INVALID_TRADE_PARAMETERS;
             break;
 
          case NO_ERROR:
-            if (__LOG()) log("OrderCloseEx(42)  no error returned => ERR_RUNTIME_ERROR");
+            if (IsLogNotice()) logNotice("OrderCloseEx(42)  no error returned => ERR_RUNTIME_ERROR");
             error = ERR_RUNTIME_ERROR;
             break;
       }
@@ -5733,11 +5825,11 @@ string OrderCloseEx.SuccessMsg(int oe[]) {
    if (remainder != 0)
       message = message +", remainder: #"+ remainder +" "+ sType +" "+ NumberToStr(oe.RemainingLots(oe), ".+") +" "+ symbol;
 
-   if (!This.IsTesting()) message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
-
-   int requotes = oe.Requotes(oe);
-   message = message +" and "+ requotes +" requote"+ Pluralize(requotes);
-
+   if (!This.IsTesting()) {
+      message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
+      int requotes = oe.Requotes(oe);
+      if (requotes > 0) message = message +" and "+ requotes +" requote"+ Pluralize(requotes);
+   }
    return(message + sSlippage);
 }
 
@@ -5750,7 +5842,7 @@ string OrderCloseEx.SuccessMsg(int oe[]) {
  * @return string
  */
 string OrderCloseEx.ErrorMsg(int oe[]) {
-   // error while trying to close #1 Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8[, sl=1.5500'0[, tp=1.5600'0[, stop distance=0.1 pip]]] (market Bid/Ask) after 0.345 s
+   // error while trying to close #1 Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8[, sl=1.5500'0[, tp=1.5600'0[, stop distance=0.1 pip]]] (market: Bid/Ask) after 0.345 s
 
    int    digits      = oe.Digits(oe);
    int    pipDigits   = digits & (~1);
@@ -5761,7 +5853,7 @@ string OrderCloseEx.ErrorMsg(int oe[]) {
    string comment     = oe.Comment(oe);
       if (StringLen(comment) > 0) comment = " \""+ comment +"\"";
    string sPrice      = NumberToStr(oe.ClosePrice(oe), priceFormat);
-   string sMarket     = "(market "+ NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat) +"/"+ NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat) +")";
+   string sMarket     = "(market: "+ NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat) +"/"+ NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat) +")";
 
    string sSL = ""; if (!EQ(oe.StopLoss  (oe), 0)) sSL = ", sl="+ NumberToStr(oe.StopLoss  (oe), priceFormat);
    string sTP = ""; if (!EQ(oe.TakeProfit(oe), 0)) sTP = ", tp="+ NumberToStr(oe.TakeProfit(oe), priceFormat);
@@ -5923,7 +6015,7 @@ bool OrderCloseByEx(int ticket, int opposite, color markerColor, int oeFlags, in
       if (IsStopped()) return(_false(Order.HandleError("OrderCloseByEx(16)  "+ OrderCloseByEx.ErrorMsg(first, second, oe), ERS_EXECUTION_STOPPING, oeFlags, oe), OrderPop("OrderCloseByEx(17)")));
 
       if (IsTradeContextBusy()) {
-         if (__LOG()) log("OrderCloseByEx(18)  trade context busy, retrying...");
+         if (IsLogInfo()) logInfo("OrderCloseByEx(18)  trade context busy, retrying...");
          Sleep(300);
          continue;
       }
@@ -6003,7 +6095,7 @@ bool OrderCloseByEx(int ticket, int opposite, color markerColor, int oeFlags, in
             oe.setRemainingLots  (oe, remainderLots                 );
          }
 
-         if (__LOG()) log("OrderCloseByEx(26)  "+ OrderCloseByEx.SuccessMsg(first, second, largerType, oe));
+         if (IsLogInfo()) logInfo("OrderCloseByEx(26)  "+ OrderCloseByEx.SuccessMsg(first, second, largerType, oe));
          if (!IsTesting()) PlaySoundEx("OrderOk.wav");
          return(!oe.setError(oe, catch("OrderCloseByEx(27)", NULL, O_POP)));     // regular exit (NO_ERROR)
       }
@@ -6012,7 +6104,7 @@ bool OrderCloseByEx(int ticket, int opposite, color markerColor, int oeFlags, in
 
       switch (error) {
          case ERR_TRADE_CONTEXT_BUSY:
-            if (__LOG()) log("OrderCloseByEx(28)  trade context busy, retrying...");
+            if (IsLogInfo()) logInfo("OrderCloseByEx(28)  trade context busy, retrying...");
             Sleep(300);
             continue;
 
@@ -6020,17 +6112,17 @@ bool OrderCloseByEx(int ticket, int opposite, color markerColor, int oeFlags, in
          case ERR_TRADE_TIMEOUT:
             tempErrors++;
             if (tempErrors > 5) break;
-            warn("OrderCloseByEx(29)  "+ Order.TempErrorMsg(oe, tempErrors), error);
+            logWarn("OrderCloseByEx(29)  "+ Order.TempErrorMsg(oe, tempErrors), error);
             continue;
 
          // map terminal generated errors
          case ERR_INVALID_TICKET:                 // unknown tickets or not open positions anymore (client-side)                          ! not yet encountered
-            if (__LOG()) log("OrderCloseByEx(30)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
+            if (IsLogInfo()) logInfo("OrderCloseByEx(30)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
             error = ERR_INVALID_TRADE_PARAMETERS;
             break;
 
          case ERR_OFF_QUOTES:                     // positions are locked and in processing queue (server-side) => SL/TP are executed     ! not yet encountered
-            if (__LOG()) log("OrderCloseByEx(31)  translating returned ERR_OFF_QUOTES => ERR_INVALID_TRADE_PARAMETERS");
+            if (IsLogInfo()) logInfo("OrderCloseByEx(31)  translating returned ERR_OFF_QUOTES => ERR_INVALID_TRADE_PARAMETERS");
             error = ERR_INVALID_TRADE_PARAMETERS;
             break;
 
@@ -6038,7 +6130,7 @@ bool OrderCloseByEx(int ticket, int opposite, color markerColor, int oeFlags, in
             break;
 
          case NO_ERROR:
-            if (__LOG()) log("OrderCloseByEx(32)  no error returned => ERR_RUNTIME_ERROR");
+            if (IsLogNotice()) logNotice("OrderCloseByEx(32)  no error returned => ERR_RUNTIME_ERROR");
             error = oe.setError(oe, ERR_RUNTIME_ERROR);
             break;
       }
@@ -6174,7 +6266,7 @@ bool OrdersClose(int tickets[], double slippage, color markerColor, int oeFlags,
 
    // tickets belong to multiple symbols
    // we are not in the Tester
-   if (__LOG()) log("OrdersClose(15)  closing "+ sizeOfTickets +" mixed positions "+ TicketsToStr.Lots(tickets, NULL));
+   if (IsLogInfo()) logInfo("OrdersClose(15)  closing "+ sizeOfTickets +" mixed positions "+ TicketsToStr.Lots(tickets, NULL));
 
    // continue with a modifyable copy of tickets[]
    int ticketsCopy[], flatSymbols[]; ArrayResize(ticketsCopy, 0); ArrayResize(flatSymbols, 0);
@@ -6332,7 +6424,7 @@ bool OrdersCloseSameSymbol(int tickets[], double slippage, color markerColor, in
    }
 
    // multiple close
-   if (__LOG()) log("OrdersCloseSameSymbol(16)  closing "+ sizeOfTickets +" "+ symbol +" positions "+ TicketsToStr.Lots(tickets, NULL));
+   if (IsLogInfo()) logInfo("OrdersCloseSameSymbol(16)  closing "+ sizeOfTickets +" "+ symbol +" positions "+ TicketsToStr.Lots(tickets, NULL));
 
    // continue with a modifyable copy of tickets[]
    int ticketsCopy[]; ArrayResize(ticketsCopy, 0);
@@ -6459,7 +6551,7 @@ int OrdersHedge(int tickets[], double slippage, int oeFlags, int oes[][]) {
 
    if (EQ(totalLots, 0)) {
       // total position is already flat
-      if (__LOG()) log("OrdersHedge(13)  "+ sizeOfTickets +" "+ symbol +" positions "+ TicketsToStr.Lots(tickets, NULL) +" are already flat");
+      if (IsLogInfo()) logInfo("OrdersHedge(13)  "+ sizeOfTickets +" "+ symbol +" positions "+ TicketsToStr.Lots(tickets, NULL) +" are already flat");
 
       // set all CloseTime/ClosePrices to OpenTime/OpenPrice of the ticket opened last
       int ticketsCopy[]; ArrayResize(ticketsCopy, 0);
@@ -6478,7 +6570,7 @@ int OrdersHedge(int tickets[], double slippage, int oeFlags, int oes[][]) {
    else {
       // total position is not flat
       OrderPop("OrdersHedge(16)");
-      if (__LOG()) log("OrdersHedge(17)  hedging "+ sizeOfTickets +" "+ symbol +" position"+ ifString(sizeOfTickets==1, " ", "s ") + TicketsToStr.Lots(tickets, NULL));
+      if (IsLogInfo()) logInfo("OrdersHedge(17)  hedging "+ sizeOfTickets +" "+ symbol +" position"+ ifString(sizeOfTickets==1, " ", "s ") + TicketsToStr.Lots(tickets, NULL));
       int closeTicket, totalDir=ifInt(GT(totalLots, 0), OP_LONG, OP_SHORT), oe[];
 
       // if possible use OrderCloseEx() for hedging (reduces MarginRequired and cannot cause violation of TradeserverLimit)
@@ -6619,7 +6711,7 @@ bool OrdersCloseHedged(int tickets[], color markerColor, int oeFlags, int oes[][
    }
    if (NE(lots, 0, 2)) return(_false(Order.HandleError("OrdersCloseHedged(13)  tickets don't form a flat position (total position: "+ DoubleToStr(lots, 2) +")", ERR_TOTAL_POSITION_NOT_FLAT, oeFlags, oes), OrderPop("OrdersCloseHedged(14)")));
 
-   if (__LOG()) log("OrdersCloseHedged(15)  closing "+ sizeOfTickets +" hedged "+ OrderSymbol() +" positions "+ TicketsToStr.Lots(tickets, NULL));
+   if (IsLogInfo()) logInfo("OrdersCloseHedged(15)  closing "+ sizeOfTickets +" hedged "+ OrderSymbol() +" positions "+ TicketsToStr.Lots(tickets, NULL));
 
    // continue with a modifyable copy of tickets[]
    int ticketsCopy[]; ArrayResize(ticketsCopy, 0);
@@ -6735,7 +6827,7 @@ bool OrderDeleteEx(int ticket, color markerColor, int oeFlags, int oe[]) {
       if (IsStopped()) return(_false(Order.HandleError("OrderDeleteEx(9)  "+ OrderDeleteEx.ErrorMsg(oe), ERS_EXECUTION_STOPPING, oeFlags, oe), OrderPop("OrderDeleteEx(10)")));
 
       if (IsTradeContextBusy()) {
-         if (__LOG()) log("OrderDeleteEx(11)  trade context busy, retrying...");
+         if (IsLogInfo()) logInfo("OrderDeleteEx(11)  trade context busy, retrying...");
          Sleep(300);
          continue;
       }
@@ -6753,7 +6845,7 @@ bool OrderDeleteEx(int ticket, color markerColor, int oeFlags, int oe[]) {
          if (!ChartMarker.OrderDeleted_A(ticket, oe.Digits(oe), markerColor))
             return(_false(oe.setError(oe, last_error), OrderPop("OrderDeleteEx(12)")));
 
-         if (__LOG()) log(StringConcatenate("OrderDeleteEx(13)  ", OrderDeleteEx.SuccessMsg(oe)));
+         if (IsLogInfo()) logInfo(StringConcatenate("OrderDeleteEx(13)  ", OrderDeleteEx.SuccessMsg(oe)));
          if (!IsTesting())
             PlaySoundEx("OrderOk.wav");
 
@@ -6764,7 +6856,7 @@ bool OrderDeleteEx(int ticket, color markerColor, int oeFlags, int oe[]) {
 
       switch (error) {
          case ERR_TRADE_CONTEXT_BUSY:
-            if (__LOG()) log("OrderDeleteEx(15)  trade context busy, retrying...");
+            if (IsLogInfo()) logInfo("OrderDeleteEx(15)  trade context busy, retrying...");
             Sleep(300);
             continue;
 
@@ -6772,22 +6864,22 @@ bool OrderDeleteEx(int ticket, color markerColor, int oeFlags, int oe[]) {
          case ERR_TRADE_TIMEOUT:
             tempErrors++;
             if (tempErrors > 5) break;
-            warn("OrderDeleteEx(16)  "+ Order.TempErrorMsg(oe, tempErrors), error);
+            logWarn("OrderDeleteEx(16)  "+ Order.TempErrorMsg(oe, tempErrors), error);
             continue;
 
          // map terminal generated errors
          case ERR_INVALID_TICKET:                // unknown ticket or not open pending order anymore (client-side)
-            if (__LOG()) log("OrderDeleteEx(17)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
+            if (IsLogInfo()) logInfo("OrderDeleteEx(17)  translating returned ERR_INVALID_TICKET => ERR_INVALID_TRADE_PARAMETERS");
             error = ERR_INVALID_TRADE_PARAMETERS;
             break;
          case ERR_OFF_QUOTES:                    // order is locked and in processing queue (server-side)
-            if (__LOG()) log("OrderDeleteEx(18)  translating returned ERR_OFF_QUOTES => ERR_INVALID_TRADE_PARAMETERS");
+            if (IsLogInfo()) logInfo("OrderDeleteEx(18)  translating returned ERR_OFF_QUOTES => ERR_INVALID_TRADE_PARAMETERS");
             error = ERR_INVALID_TRADE_PARAMETERS;
             break;
          case ERR_INVALID_TRADE_PARAMETERS:      // order is processed and not open pending anymore (server-side)
             break;
          case NO_ERROR:
-            if (__LOG()) log("OrderDeleteEx(19)  no error returned => ERR_RUNTIME_ERROR");
+            if (IsLogNotice()) logNotice("OrderDeleteEx(19)  no error returned => ERR_RUNTIME_ERROR");
             error = ERR_RUNTIME_ERROR;
             break;
       }
@@ -6832,7 +6924,7 @@ string OrderDeleteEx.SuccessMsg(int oe[]) {
  */
 string OrderDeleteEx.ErrorMsg(int oe[]) {
    // The ticket always exists. Typically it is not a pendig order (anymore).
-   // error while trying to delete #1 Stop Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8, sl=1.5500'0, tp=1.5600'0 (market Bid/Ask) after 0.345 s
+   // error while trying to delete #1 Stop Buy 0.5 GBPUSD "SR.1234.+1" at 1.5524'8, sl=1.5500'0, tp=1.5600'0 (market: Bid/Ask) after 0.345 s
    int    digits      = oe.Digits(oe);
    int    pipDigits   = digits & (~1);
    string priceFormat = "."+ pipDigits + ifString(digits==pipDigits, "", "'");
@@ -6846,7 +6938,7 @@ string OrderDeleteEx.ErrorMsg(int oe[]) {
    string sSL     = ""; if (!EQ(oe.StopLoss  (oe), 0, digits)) sSL = ", sl="+ NumberToStr(oe.StopLoss  (oe), priceFormat);
    string sTP     = ""; if (!EQ(oe.TakeProfit(oe), 0, digits)) sTP = ", tp="+ NumberToStr(oe.TakeProfit(oe), priceFormat);
    string sSD     = ""; if (oe.Error(oe) == ERR_INVALID_STOP)  sSD = ", stop distance="+ NumberToStr(oe.StopDistance(oe), ".+") +" pip";
-   string sMarket = "(market "+ NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat) +"/"+ NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat) +")";
+   string sMarket = "(market: "+ NumberToStr(MarketInfo(symbol, MODE_BID), priceFormat) +"/"+ NumberToStr(MarketInfo(symbol, MODE_ASK), priceFormat) +")";
 
    string message = "error while trying to delete #"+ oe.Ticket(oe) +" "+ sType +" "+ sLots +" "+ symbol + sComment +" at "+ sPrice + sSL + sTP + sSD +" "+ sMarket;
    if (!This.IsTesting()) message = message +" after "+ DoubleToStr(oe.Duration(oe)/1000., 3) +" s";
@@ -6897,7 +6989,7 @@ bool DeletePendingOrders(color markerColor = CLR_NONE) {
  * @see  ChartMarker.OrderSent_B(), wenn das Ticket während der Ausführung nicht selektierbar ist
  */
 bool ChartMarker.OrderSent_A(int ticket, int digits, color markerColor) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    if (!SelectTicket(ticket, "ChartMarker.OrderSent_A(1)", O_PUSH))
       return(false);
@@ -6929,7 +7021,7 @@ bool ChartMarker.OrderSent_A(int ticket, int digits, color markerColor) {
  * @see  ChartMarker.OrderSent_A(), wenn das Ticket während der Ausführung selektierbar ist
  */
 bool ChartMarker.OrderSent_B(int ticket, int digits, color markerColor, int type, double lots, string symbol, datetime openTime, double openPrice, double stopLoss, double takeProfit, string comment) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    static string types[] = {"buy","sell","buy limit","sell limit","buy stop","sell stop"};
 
@@ -6982,7 +7074,7 @@ bool ChartMarker.OrderSent_B(int ticket, int digits, color markerColor, int type
  * @see  ChartMarker.OrderModified_B(), wenn das Ticket während der Ausführung nicht selektierbar ist
  */
 bool ChartMarker.OrderModified_A(int ticket, int digits, color markerColor, datetime modifyTime, double oldOpenPrice, double oldStopLoss, double oldTakeprofit) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    if (!SelectTicket(ticket, "ChartMarker.OrderModified_A(1)", O_PUSH))
       return(false);
@@ -7018,7 +7110,7 @@ bool ChartMarker.OrderModified_A(int ticket, int digits, color markerColor, date
  * @see  ChartMarker.OrderModified_A(), wenn das Ticket während der Ausführung selektierbar ist
  */
 bool ChartMarker.OrderModified_B(int ticket, int digits, color markerColor, int type, double lots, string symbol, datetime openTime, datetime modifyTime, double oldOpenPrice, double openPrice, double oldStopLoss, double stopLoss, double oldTakeProfit, double takeProfit, string comment) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    bool openModified = !EQ(openPrice,  oldOpenPrice );
    bool slModified   = !EQ(stopLoss,   oldStopLoss  );
@@ -7105,7 +7197,7 @@ bool ChartMarker.OrderModified_B(int ticket, int digits, color markerColor, int 
  * @see  ChartMarker.OrderFilled_B(), wenn das Ticket während der Ausführung nicht selektierbar ist
  */
 bool ChartMarker.OrderFilled_A(int ticket, int pendingType, double pendingPrice, int digits, color markerColor) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    if (!SelectTicket(ticket, "ChartMarker.OrderFilled_A(1)", O_PUSH))
       return(false);
@@ -7136,7 +7228,7 @@ bool ChartMarker.OrderFilled_A(int ticket, int pendingType, double pendingPrice,
  * @see  ChartMarker.OrderFilled_A(), wenn das Ticket während der Ausführung selektierbar ist
  */
 bool ChartMarker.OrderFilled_B(int ticket, int pendingType, double pendingPrice, int digits, color markerColor, double lots, string symbol, datetime openTime, double openPrice, string comment) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    static string types[] = {"buy","sell","buy limit","sell limit","buy stop","sell stop"};
 
@@ -7184,7 +7276,7 @@ bool ChartMarker.OrderFilled_B(int ticket, int pendingType, double pendingPrice,
  * @return bool - Erfolgsstatus
  */
 bool ChartMarker.PositionClosed_A(int ticket, int digits, color markerColor) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    if (!SelectTicket(ticket, "ChartMarker.PositionClosed_A(1)", O_PUSH))
       return(false);
@@ -7213,7 +7305,7 @@ bool ChartMarker.PositionClosed_A(int ticket, int digits, color markerColor) {
  * @return bool - Erfolgsstatus
  */
 bool ChartMarker.PositionClosed_B(int ticket, int digits, color markerColor, int type, double lots, string symbol, datetime openTime, double openPrice, datetime closeTime, double closePrice) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    static string types[] = {"buy","sell","buy limit","sell limit","buy stop","sell stop"};
 
@@ -7269,7 +7361,7 @@ bool ChartMarker.PositionClosed_B(int ticket, int digits, color markerColor, int
  * @see  ChartMarker.OrderDeleted_B(), wenn das Ticket während der Ausführung nicht selektierbar ist
  */
 bool ChartMarker.OrderDeleted_A(int ticket, int digits, color markerColor) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    if (!SelectTicket(ticket, "ChartMarker.OrderDeleted_A(1)", O_PUSH))
       return(false);
@@ -7300,7 +7392,7 @@ bool ChartMarker.OrderDeleted_A(int ticket, int digits, color markerColor) {
  * @see  ChartMarker.OrderDeleted_A(), wenn das Ticket während der Ausführung selektierbar ist
  */
 bool ChartMarker.OrderDeleted_B(int ticket, int digits, color markerColor, int type, double lots, string symbol, datetime openTime, double openPrice, datetime closeTime, double closePrice) {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    static string types[] = {"buy","sell","buy limit","sell limit","buy stop","sell stop"};
 
@@ -7407,26 +7499,29 @@ void Library.ResetGlobalVars() {
 }
 
 
-// abstrakte Funktionen (müssen bei Verwendung im Programm implementiert werden)
-/*abstract*/ bool onBarOpen()              { return(!catch("onBarOpen(1)", ERR_NOT_IMPLEMENTED)); }
-/*abstract*/ bool onCommand(string data[]) { return(!catch("onCommand(1)", ERR_NOT_IMPLEMENTED)); }
+// catch non-implemented event handlers (if used the functions must be implemented in the program main module)
+bool onBarOpen()              { return(!catch("onBarOpen()  must be implemented in the program main module", ERR_NOT_IMPLEMENTED)); }
+bool onCommand(string data[]) { return(!catch("onCommand()  must be implemented in the program main module", ERR_NOT_IMPLEMENTED)); }
 
 
 #import "rsfLib2.ex4"
+   bool   DoubleQuoteStrings(string array[]);
    string DoublesToStr(double array[], string separator);
    string TicketsToStr.Lots(int array[], string separator);
 
 #import "rsfExpander.dll"
    int    GetIniKeysA(string fileName, string section, int buffer[], int bufferSize);
    int    GetIniSectionsA(string fileName, int buffer[], int bufferSize);
+   bool   SortMqlStringsA(string values[], int size);
+
+   bool   Test_onPositionOpen(int ec[], int ticket, int type, double lots, string symbol, double openPrice, datetime openTime, double stopLoss, double takeProfit, double commission, int magicNumber, string comment);
+   bool   Test_onPositionClose(int ec[], int ticket, double closePrice, datetime closeTime, double swap, double profit);
+
    int    pi_hProcess(int pi[]);
    int    pi_hThread(int pi[]);
    int    si_setFlags(int si[], int flags);
    int    si_setShowWindow(int si[], int cmdShow);
    int    si_setSize(int si[], int size);
-   bool   SortMqlStringsA(string values[], int size);
-   bool   Test_onPositionOpen(int ec[], int ticket, int type, double lots, string symbol, double openPrice, datetime openTime, double stopLoss, double takeProfit, double commission, int magicNumber, string comment);
-   bool   Test_onPositionClose(int ec[], int ticket, double closePrice, datetime closeTime, double swap, double profit);
    int    tzi_Bias(int tzi[]);
    int    tzi_DaylightBias(int tzi[]);
    bool   wfd_FileAttribute_Directory(int wfd[]);

@@ -1,10 +1,11 @@
 /**
- * MQL constant definitions
+ * MQL constants. Separately defined constants prevent C++ warnings "C4005: macro redefinition"
  */
-#include <shared/defines.h>            // constants shared by framework (MQL) and MT4Expander (C++)
-#include <shared/errors.h>             // error codes shared by framework (MQL) and MT4Expander (C++)
+#define INT_MIN   0x80000000                       // -2147483648: minimum signed int value
+#define INT_MAX   0x7FFFFFFF                       //  2147483647: maximum signed int value
 
+#include <shared/defines.h>                        // constants shared by MQL4 and MT4Expander
+#include <shared/errors.h>                         // error codes shared by MQL4 and MT4Expander
 
-// separately defined constants to prevent C++ warning "C4005: macro redefinition"
-#define CLR_NONE  0xFFFFFFFF           // no color in contrast to White = 0x00FFFFFF (win32: 0xFFFFFFFFL)
-#define NO_ERROR  ERR_NO_ERROR         // win32: 0x0L
+#define CLR_NONE  0xFFFFFFFF                       // Win32 API: 0xFFFFFFFFL
+#define NO_ERROR  ERR_NO_ERROR                     // Win32 API: 0x0L

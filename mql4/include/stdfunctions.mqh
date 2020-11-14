@@ -1,246 +1,21 @@
 /**
- * Globale Funktionen.
+ * Global functions
  */
 #include <configuration.mqh>
-#include <metaquotes.mqh>                                            // MetaQuotes-Aliase
+#include <log.mqh>
+#include <metaquotes.mqh>
 #include <rsfExpander.mqh>
 
 
 /**
- * Lädt den Input-Dialog des aktuellen Programms neu.
- *
- * @return int - Fehlerstatus
- */
-int start.RelaunchInputDialog() {
-   int error;
-
-   if (IsExpert()) {
-      if (!IsTesting())
-         error = Chart.Expert.Properties();
-   }
-   else if (IsIndicator()) {
-      //if (!IsTesting())
-      //   error = Chart.Indicator.Properties();                     // TODO: implementieren
-   }
-
-   if (IsError(error))
-      SetLastError(error, NULL);
-   return(error);
-}
-
-
-/**
- * Send a message to the system debugger.
- *
- * @param  string message          - message
- * @param  int    error [optional] - error code
- *
- * @return int - the same error
- *
- * Notes:
- *  - No part of this function must load additional EX4 libaries.
- *  - The terminal must run with Administrator rights for OutputDebugString() to transport debug messages.
- */
-int debug(string message, int error = NO_ERROR) {
-   static bool recursiveCall = false;
-   if (recursiveCall) {                               // prevent recursive calls
-      Print("debug(1)  recursive call: ", message);
-      return(error);
-   }
-   recursiveCall = true;
-
-   if (error != NO_ERROR) message = StringConcatenate(message, "  [", ErrorToStr(error), "]");
-
-   if (This.IsTesting()) string application = StringConcatenate(GmtTimeFormat(MarketInfo(Symbol(), MODE_TIME), "%d.%m.%Y %H:%M:%S"), " Tester::");
-   else                         application = "MetaTrader::";
-
-   OutputDebugStringA(StringConcatenate(application, Symbol(), ",", PeriodDescription(Period()), "::", __NAME(), "::", StrReplace(StrReplaceR(message, NL+NL, NL), NL, " ")));
-
-   recursiveCall = false;
-   return(error);
-}
-
-
-/**
- * Check if an error occurred and signal it. The error is stored in the global var "last_error". After the function returned
- * the internal MQL error code as returned by GetLastError() is always reset.
- *
- * @param  string location            - the error's location identifier incl. optional message
- * @param  int    error    [optional] - enforce a specific error (default: none)
- * @param  bool   orderPop [optional] - whether the last order context should be restored from the order context stack
- *                                      (default: no)
- *
- * @return int - the same error
- */
-int catch(string location, int error=NO_ERROR, bool orderPop=false) {
-   orderPop = orderPop!=0;
-
-   if      (!error                  ) { error  =                      GetLastError(); }
-   else if (error == ERR_WIN32_ERROR) { error += GetLastWin32Error(); GetLastError(); }
-   else                               {                               GetLastError(); }
-
-   static bool recursiveCall = false;
-
-   if (error != NO_ERROR) {
-      if (recursiveCall)                                                                              // prevent recursive calls
-         return(debug("catch(1)  recursive call: "+ location, error));
-      recursiveCall = true;
-
-      // always send the error to the system debugger
-      debug("ERROR: "+ location, error);
-
-      // log the error
-      string name    = __NAME();
-      string message = location +"  ["+ ErrorToStr(error) +"]";
-      bool logged, alerted;
-      if (__ExecutionContext[EC.logToCustomEnabled] != 0)                                             // custom log, on error fall-back to terminal log
-         logged = logged || LogMessageA(__ExecutionContext, "ERROR: "+ name +"::"+ message, error);
-      if (!logged) {
-         Alert("ERROR:   ", Symbol(), ",", PeriodDescription(Period()), "  ", name, "::", message);   // terminal log
-         logged  = true;
-         alerted = alerted || !IsExpert() || !IsTesting();
-      }
-      message = name +"::"+ message;
-
-      // display the error
-      if (IsTesting()) {
-         // neither Alert() nor MessageBox() can be used
-         string caption = "Strategy Tester "+ Symbol() +","+ PeriodDescription(Period());
-         int pos = StringFind(message, ") ");
-         if (pos == -1) message = "ERROR in "+ message;                                               // wrap message after the closing function brace
-         else           message = "ERROR in "+ StrLeft(message, pos+1) + NL + StringTrimLeft(StrSubstr(message, pos+2));
-                        message = TimeToStr(TimeCurrentEx("catch(2)"), TIME_FULL) + NL + message;
-         PlaySoundEx("alert.wav");
-         MessageBoxEx(caption, message, MB_ICONERROR|MB_OK|MB_DONT_LOG);
-         alerted = true;
-      }
-      else {
-         message = "ERROR:   "+ Symbol() +","+ PeriodDescription(Period()) +"  "+ message;
-         if (!alerted) {
-            Alert(message);
-            alerted = true;
-         }
-         if (IsExpert()) {
-            string accountTime = "("+ TimeToStr(TimeLocal(), TIME_MINUTES|TIME_SECONDS) +", "+ AccountAlias(ShortAccountCompany(), GetAccountNumber()) +")";
-            if (__LOG_ERROR.mail) SendEmail(__LOG_ERROR.mail.sender, __LOG_ERROR.mail.receiver, message, message + NL + accountTime);
-            if (__LOG_ERROR.sms)  SendSMS  (__LOG_ERROR.sms.receiver, message + NL + accountTime);
-         }
-      }
-
-      // set last_error
-      SetLastError(error, NULL);
-      recursiveCall = false;
-   }
-
-   if (orderPop)
-      OrderPop(location);
-   return(error);
-}
-
-
-/**
- * Show a warning with an optional error but don't set the error.
- *
- * @param  string message          - message to display
- * @param  int    error [optional] - error to display
- *
- * @return int - the same error
- */
-int warn(string message, int error = NO_ERROR) {
-   static bool recursiveCall = false;
-   if (recursiveCall)                                                                           // prevent recursive calls
-      return(debug("warn(1)  recursive call: "+ message, error));
-   recursiveCall = true;
-
-   // always send the warning to the system debugger
-   debug("WARN: "+ message, error);
-
-   if (error != NO_ERROR) message = message +"  ["+ ErrorToStr(error) +"]";
-
-   // log the warning
-   string name = __NAME();
-   bool logged, alerted;
-   if (__ExecutionContext[EC.logToCustomEnabled] != 0)                                          // custom log, on error fall-back to terminal log
-      logged = logged || LogMessageA(__ExecutionContext, "WARN: "+ name +"::"+ message, error);
-   if (!logged) {
-      Alert("WARN:   ", Symbol(), ",", PeriodDescription(Period()), "  ", name, "::", message); // terminal log
-      logged  = true;
-      alerted = !IsExpert() || !IsTesting();
-   }
-   message = name +"::"+ message;
-
-   // display the warning
-   if (IsTesting()) {
-      // neither Alert() nor MessageBox() can be used
-      string caption = "Strategy Tester "+ Symbol() +","+ PeriodDescription(Period());
-      int pos = StringFind(message, ") ");
-      if (pos == -1) message = "WARN in "+ message;                                             // wrap message after the closing function brace
-      else           message = "WARN in "+ StrLeft(message, pos+1) + NL + StringTrimLeft(StrSubstr(message, pos+2));
-                     message = TimeToStr(TimeCurrentEx("warn(1)"), TIME_FULL) + NL + message;
-
-      PlaySoundEx("alert.wav");
-      MessageBoxEx(caption, message, MB_ICONERROR|MB_OK|MB_DONT_LOG);
-   }
-   else {
-      message = "WARN:   "+ Symbol() +","+ PeriodDescription(Period()) +"  "+ message;
-      if (!alerted) {
-         Alert(message);
-         alerted = true;
-      }
-      if (IsExpert()) {
-         string accountTime = "("+ TimeToStr(TimeLocal(), TIME_MINUTES|TIME_SECONDS) +", "+ AccountAlias(ShortAccountCompany(), GetAccountNumber()) +")";
-         if (__LOG_WARN.mail) SendEmail(__LOG_WARN.mail.sender, __LOG_WARN.mail.receiver, message, message + NL + accountTime);
-         if (__LOG_WARN.sms)  SendSMS  (__LOG_WARN.sms.receiver, message + NL + accountTime);
-      }
-   }
-
-   recursiveCall = false;
-   return(error);
-}
-
-
-/**
- * Log a message to the configured log appenders.
- *
- * @param  string message
- * @param  int    error [optional] - error to log (default: none)
- *
- * @return int - the same error
- */
-int log(string message, int error = NO_ERROR) {
-   if (!__ExecutionContext[EC.logEnabled]) return(error);         // skip logging if fully disabled
-
-   static bool recursiveCall = false;
-   if (recursiveCall)                                             // prevent recursive calls
-      return(debug("log(1)  recursive call: "+ message, error));
-   recursiveCall = true;
-
-   if (__ExecutionContext[EC.logToDebugEnabled] != 0) {           // send the message to the system debugger
-      debug(message, error);
-   }
-   if (__ExecutionContext[EC.logToTerminalEnabled] != 0) {        // send the message to the terminal log
-      string sError = "";
-      if (error != NO_ERROR) sError = "  ["+ ErrorToStr(error) +"]";
-      Print(__NAME(), "::", message, sError);
-   }
-   if (__ExecutionContext[EC.logToCustomEnabled] != 0) {          // send the message to a custom logger
-      LogMessageA(__ExecutionContext, message, error);
-   }
-
-   recursiveCall = false;
-   return(error);
-}
-
-
-/**
- * Set the last error code of the module. If called in a library the error will bubble up to the program's main module.
+ * Set the last error code of the MQL module. If called in a library the error will bubble up to the program's main module.
  * If called in an indicator loaded by iCustom() the error will bubble up to the caller of iCustom(). The error code NO_ERROR
  * will never bubble up.
  *
- * @param  int error - error code
- * @param  int param - ignored, any other value (default: none)
+ * @param  int error            - error code
+ * @param  int param [optional] - any value (not processed)
  *
- * @return int - the same error code (for chaining)
+ * @return int - the same error
  */
 int SetLastError(int error, int param = NULL) {
    last_error = ec_SetMqlError(__ExecutionContext, error);
@@ -252,9 +27,9 @@ int SetLastError(int error, int param = NULL) {
 
 
 /**
- * Gibt die Beschreibung eines Fehlercodes zurück.
+ * Return the description of an error code.
  *
- * @param  int error - MQL- oder gemappter Win32-Fehlercode
+ * @param  int error - MQL error code or mapped Win32 error code
  *
  * @return string
  */
@@ -302,7 +77,7 @@ string ErrorDescription(int error) {
       case ERR_TRADE_PROHIBITED_BY_FIFO   : return("prohibited by FIFO rules"                                  );    //    150
 
       // runtime errors
-      case ERR_NO_MQLERROR                : return("no MQL error"                                              );    //   4000 never generated error
+      case ERR_NO_MQLERROR                : return("never generated error"                                     );    //   4000 never generated error
       case ERR_WRONG_FUNCTION_POINTER     : return("wrong function pointer"                                    );    //   4001
       case ERR_ARRAY_INDEX_OUT_OF_RANGE   : return("array index out of range"                                  );    //   4002
       case ERR_NO_MEMORY_FOR_CALL_STACK   : return("no memory for function call stack"                         );    //   4003
@@ -453,7 +228,7 @@ string ErrorDescription(int error) {
       case ERR_TERMINAL_INIT_FAILURE      : return("multiple Expert::init() calls"                             );    //  65554
       case ERS_TERMINAL_NOT_YET_READY     : return("terminal not yet ready"                                    );    //  65555   status
       case ERR_TOTAL_POSITION_NOT_FLAT    : return("total position encountered when flat position was expected");    //  65556
-      case ERR_UNDEFINED_STATE            : return("undefined state or behaviour"                              );    //  65557
+      case ERR_UNDEFINED_STATE            : return("undefined state or behavior"                               );    //  65557
    }
    return(StringConcatenate("unknown error (", error, ")"));
 }
@@ -554,7 +329,7 @@ string StrSubstr(string str, int start, int length = INT_MAX) {
  *
  * Asynchronously plays a sound (instead of synchronously and UI blocking as the terminal does). Also plays a sound if the
  * terminal doesn't support it (e.g. in Strategy Tester). If the specified sound file is not found a message is logged but
- * execution continues normally.
+ * execution continues.
  *
  * @param  string soundfile
  * @param  int    flags
@@ -569,7 +344,7 @@ bool PlaySoundEx(string soundfile, int flags = NULL) {
       fullName = StringConcatenate(GetTerminalDataPathA(), "\\sounds\\", filename);
       if (!IsFileA(fullName)) {
          if (!(flags & MB_DONT_LOG))
-            log("PlaySoundEx(1)  sound file not found: \""+ soundfile +"\"", ERR_FILE_NOT_FOUND);
+            logWarn("PlaySoundEx(1)  sound file not found: \""+ soundfile +"\"", ERR_FILE_NOT_FOUND);
          return(false);
       }
    }
@@ -618,25 +393,25 @@ string Pluralize(int count, string singular="", string plural="s") {
 
 
 /**
- * Dropin replacement for Alert().
- *
  * Display an alert even if not supported by the terminal in the current context (e.g. in tester).
  *
  * @param  string message
+ *
+ * Notes: This function must not call .EX4 library functions. Calling DLL functions is fine.
  */
 void ForceAlert(string message) {
-   // ForceAlert() is used when Kansas is going bye-bye. To be as robust as possible it must have little/no dependencies.
-   // Especially it must NOT call any MQL library functions. DLL functions are OK.
+   debug(message);                                                          // send the message to the debug output
 
-   Alert(message);                                             // make sure the message shows up in the terminal log
+   string sPeriod = PeriodDescription(Period());
+   Alert(Symbol(), ",", sPeriod, ": ", FullModuleName(), ":  ", message);   // the message shows up in the terminal log
 
    if (IsTesting()) {
-      // Alert() prints to the log but is fully ignored otherwise
-      string caption = "Strategy Tester "+ Symbol() +","+ PeriodDescription(Period());
-      message = TimeToStr(TimeCurrent(), TIME_FULL) + NL + message;
+      // in tester no Alert() dialog was displayed
+      string sCaption = "Strategy Tester "+ Symbol() +","+ sPeriod;
+      string sMessage = TimeToStr(TimeCurrent(), TIME_FULL) + NL + message;
 
       PlaySoundEx("alert.wav", MB_DONT_LOG);
-      MessageBoxEx(caption, message, MB_ICONERROR|MB_OK|MB_DONT_LOG);
+      MessageBoxEx(sCaption, sMessage, MB_ICONERROR|MB_OK|MB_DONT_LOG);
    }
 }
 
@@ -668,8 +443,8 @@ int MessageBoxEx(string caption, string message, int flags = MB_OK) {
    else        button = MessageBoxA(GetTerminalMainWindow(), message, caption, flags|MB_TOPMOST|MB_SETFOREGROUND);
 
    if (!(flags & MB_DONT_LOG)) {
-      log("MessageBoxEx(1)  "+ message);
-      log("MessageBoxEx(2)  response: "+ MessageBoxButtonToStr(button));
+      logDebug("MessageBoxEx(1)  "+ message);
+      logDebug("MessageBoxEx(2)  response: "+ MessageBoxButtonToStr(button));
    }
    return(button);
 }
@@ -875,8 +650,8 @@ bool WaitForTicket(int ticket, bool select = false) {
    int i, delay=100;                                                 // je 0.1 Sekunden warten
 
    while (!OrderSelect(ticket, SELECT_BY_TICKET)) {
-      if (IsTesting())       warn("WaitForTicket(3)  #"+ ticket +" not yet accessible");
-      else if (i && !(i%10)) warn("WaitForTicket(4)  #"+ ticket +" not yet accessible after "+ DoubleToStr(i*delay/1000., 1) +" s");
+      if (IsTesting())       logWarn("WaitForTicket(3)  #"+ ticket +" not yet accessible");
+      else if (i && !(i%10)) logWarn("WaitForTicket(4)  #"+ ticket +" not yet accessible after "+ DoubleToStr(i*delay/1000., 1) +" s");
       Sleep(delay);
       i++;
    }
@@ -886,6 +661,25 @@ bool WaitForTicket(int ticket, bool select = false) {
    }
 
    return(true);
+}
+
+
+/**
+ * Delete a chart object and suppress an error if the object cannot be found.
+ *
+ * @param  string label               - object label
+ * @param  string location [optional] - identifier for other errors (default: none)
+ *
+ * @return bool - success status
+ */
+bool ObjectDeleteEx(string label, string location = "") {
+   if (ObjectFind(label) == -1)
+      return(true);
+
+   if (ObjectDelete(label))
+      return(true);
+
+   return(!catch("ObjectDeleteEx(1)->"+ location));
 }
 
 
@@ -1003,7 +797,7 @@ double PipValue(double lots=1.0, bool suppressErrors=false) {
       string message = "Exact tickvalue not available."+ NL
                       +"The test will use the current online tickvalue ("+ tickValue +") which is an approximation. "
                       +"Test with another account currency if you need exact values.";
-      warn("PipValue(10)  "+ message);
+      logWarn("PipValue(10)  "+ message);
       doWarn = false;
    }
    return(Pip/tickSize * tickValue * lots);
@@ -1061,58 +855,56 @@ double PipValueEx(string symbol, double lots=1.0, bool suppressErrors=false) {
 
 
 /**
- * Calculate the current symbol's commission value for the specified lot size.
+ * Calculate the current symbol's commission value for the specified lotsize.
  *
- * @param  double lots [optional] - lot size (default: 1 lot)
+ * @param  double lots [optional] - lotsize (default: 1 lot)
+ * @param  int    mode [optional] - MODE_MONEY:  in account currency (default)
+ *                                  MODE_MARKUP: as price markup in quote currency (independant of lotsize)
  *
  * @return double - commission value or EMPTY (-1) in case of errors
  */
-double GetCommission(double lots = 1.0) {
-   static double static.rate;
-   static bool   resolved;
-
-   if (!resolved) {
-      double rate;
+double GetCommission(double lots=1.0, int mode=MODE_MONEY) {
+   static double baseCommission;
+   static bool resolved; if (!resolved) {
+      double value;
 
       if (This.IsTesting()) {
-         rate = Test_GetCommission(__ExecutionContext, 1);
+         value = Test_GetCommission(__ExecutionContext, 1);
       }
       else {
          // TODO: if (is_CFD) rate = 0;
-         string company  = ShortAccountCompany(); if (!StringLen(company)) return(EMPTY);
+         string company  = GetAccountCompany(); if (!StringLen(company)) return(EMPTY);
          string currency = AccountCurrency();
-         int    account  = GetAccountNumber();    if (!account)            return(EMPTY);
+         int    account  = GetAccountNumber(); if (!account) return(EMPTY);
 
-         string section = "Commissions";
-         string key     = company +"."+ currency +"."+ account;
+         string section="Commissions", key="";
+         if      (IsGlobalConfigKeyA(section, company +"."+ currency +"."+ account)) key = company +"."+ currency +"."+ account;
+         else if (IsGlobalConfigKeyA(section, company +"."+ currency))               key = company +"."+ currency;
+         else if (IsGlobalConfigKeyA(section, company))                              key = company;
 
-         if (!IsGlobalConfigKeyA(section, key)) {
-            key = company +"."+ currency;
-            if (!IsGlobalConfigKeyA(section, key)) return(_EMPTY(catch("GetCommission(1)  missing configuration value ["+ section +"] "+ key, ERR_INVALID_CONFIG_VALUE)));
+         if (StringLen(key) > 0) {
+            value = GetGlobalConfigDouble(section, key);
+            if (value < 0) return(_EMPTY(catch("GetCommission(1)  invalid configuration value ["+ section +"] "+ key +" = "+ NumberToStr(value, ".+"), ERR_INVALID_CONFIG_VALUE)));
          }
-         rate = GetGlobalConfigDouble(section, key);
-         if (rate < 0) return(_EMPTY(catch("GetCommission(2)  invalid configuration value ["+ section +"] "+ key +" = "+ NumberToStr(rate, ".+"), ERR_INVALID_CONFIG_VALUE)));
+         else {
+            logInfo("GetCommission(2)  commission configuration for account \""+ company +"."+ currency +"."+ account +"\" not found, using default 0.00");
+         }
       }
-      static.rate = rate;
-      resolved    = true;
+      baseCommission = value;
+      resolved = true;
    }
 
-   if (lots == 1)
-      return(static.rate);
-   return(static.rate * lots);
-}
+   switch (mode) {
+      case MODE_MONEY:
+         if (lots == 1)
+            return(baseCommission);
+         return(baseCommission * lots);
 
-
-/**
- * Whether logging in general is enabled (read from the configuration). By default online logging is enabled and offline
- * logging (tester) is disabled. Called only from init.GlobalVars().
- *
- * @return bool
- */
-bool init.IsLogEnabled() {
-   if (This.IsTesting())
-      return(GetConfigBool("Logging", "LogInTester", false));                    // tester: default=off
-   return(GetConfigBool("Logging", ec_ProgramName(__ExecutionContext), true));   // online: default=on
+      case MODE_MARKUP:
+         double pipValue = PipValue(); if (!pipValue) return(EMPTY);
+         return(baseCommission/pipValue * Pip);
+   }
+   return(_EMPTY(catch("GetCommission(3)  invalid parameter mode: "+ mode, ERR_INVALID_PARAMETER)));
 }
 
 
@@ -1400,7 +1192,7 @@ int _last_error(int param1=NULL, int param2=NULL, int param3=NULL, int param4=NU
  *
  * @param  beliebige Parameter (werden ignoriert)
  *
- * @return int - EMPTY
+ * @return int - EMPTY (-1)
  */
 int _EMPTY(int param1=NULL, int param2=NULL, int param3=NULL, int param4=NULL, int param5=NULL, int param6=NULL, int param7=NULL, int param8=NULL) {
    return(EMPTY);
@@ -1408,7 +1200,7 @@ int _EMPTY(int param1=NULL, int param2=NULL, int param3=NULL, int param4=NULL, i
 
 
 /**
- * Ob der angegebene Wert die Konstante EMPTY darstellt.
+ * Ob der angegebene Wert die Konstante EMPTY darstellt (-1).
  *
  * @param  double value
  *
@@ -1433,7 +1225,7 @@ int _EMPTY_VALUE(int param1=NULL, int param2=NULL, int param3=NULL, int param4=N
 
 
 /**
- * Ob der angegebene Wert die Konstante EMPTY_VALUE darstellt.
+ * Ob der angegebene Wert die Konstante EMPTY_VALUE darstellt (0x7FFFFFFF = 2147483647 = INT_MAX).
  *
  * @param  double value
  *
@@ -1558,53 +1350,62 @@ string _string(string param1, int param2=NULL, int param3=NULL, int param4=NULL,
  *
  * @return bool
  */
-bool __CHART() {
+bool IsChart() {
    return(__ExecutionContext[EC.hChart] != 0);
 }
 
 
 /**
- * Whether logging is enabled for the current program.
- *
- * @return bool
- */
-bool __LOG() {
-   return(__ExecutionContext[EC.logEnabled] != 0);
-}
-
-
-/**
- * Return the current program's full name. For MQL main modules this value matches the return value of WindowExpertName().
- * For libraries this value includes the name of the main module, e.g. "{expert-name}::{library-name}".
+ * Return the current MQL module's program name, i.e. the name of the program's main module.
  *
  * @return string
  */
-string __NAME() {
+string ProgramName() {
    static string name = ""; if (!StringLen(name)) {
-      string program = ec_ProgramName(__ExecutionContext);
-      string module  = ec_ModuleName (__ExecutionContext);
-
-      if (StringLen(program) && StringLen(module)) {
-         name = program;
-         if (IsLibrary()) name = StringConcatenate(name, "::", module);
-      }
-      else if (IsLibrary()) {
-         if (!StringLen(program)) program = "???";
-         if (!StringLen(module))  module = WindowExpertName();
-         return(StringConcatenate(program, "::", module));
+      if (IsLibrary()) {
+         if (!IsDllsAllowed()) return("???");
+         name = ec_ProgramName(__ExecutionContext);
       }
       else {
-         return(WindowExpertName());
+         name = ModuleName();
       }
+      if (!StringLen(name)) return("???");
    }
    return(name);
 }
 
 
 /**
- * Integer-Version von MathMin()
+ * Return the current MQL module's simple name. Alias of WindowExpertName().
  *
- * Ermittelt die kleinere mehrerer Ganzzahlen.
+ * @return string
+ */
+string ModuleName() {
+   return(WindowExpertName());
+}
+
+
+/**
+ * Return the current MQL module's full name. For main modules this value matches the value of ProgramName(). For libraries
+ * this value includes the name of the MQL main module, e.g. "{expert-name}::{library-name}".
+ *
+ * @return string
+ */
+string FullModuleName() {
+   static string name = ""; if (!StringLen(name)) {
+      string program = ProgramName();
+      if (program == "???")
+         return(program + ifString(IsLibrary(), "::"+ ModuleName(), ""));
+      name = program + ifString(IsLibrary(), "::"+ ModuleName(), "");
+   }
+   return(name);
+}
+
+
+/**
+ * Integer version of MathMin()
+ *
+ * Return the smallest of all specified values.
  *
  * @param  int value1
  * @param  int value2
@@ -1629,9 +1430,9 @@ int Min(int value1, int value2, int value3=INT_MAX, int value4=INT_MAX, int valu
 
 
 /**
- * Integer-Version von MathMax()
+ * Integer version of MathMax()
  *
- * Ermittelt die größere mehrerer Ganzzahlen.
+ * Return the largest of all specified values.
  *
  * @param  int value1
  * @param  int value2
@@ -1665,6 +1466,8 @@ int Max(int value1, int value2, int value3=INT_MIN, int value4=INT_MIN, int valu
  * @return int
  */
 int Abs(int value) {
+   if (value == INT_MIN)
+      return(INT_MAX);
    if (value < 0)
       return(-value);
    return(value);
@@ -1672,15 +1475,15 @@ int Abs(int value) {
 
 
 /**
- * Gibt das Vorzeichen einer Zahl zurück.
+ * Return the sign of a numerical value.
  *
- * @param  double number - Zahl
+ * @param  double value
  *
- * @return int - Vorzeichen (+1, 0, -1)
+ * @return int - sign (+1, 0, -1)
  */
-int Sign(double number) {
-   if (GT(number, 0)) return( 1);
-   if (LT(number, 0)) return(-1);
+int Sign(double value) {
+   if (value > 0) return( 1);
+   if (value < 0) return(-1);
    return(0);
 }
 
@@ -1825,11 +1628,39 @@ double RoundCeil(double number, int decimals = 0) {
 
 
 /**
- * Dividiert zwei Doubles und fängt dabei eine Division durch 0 ab.
+ * Multiply two integer values and prevent an integer overflow.
  *
- * @param  double a                 - Divident
- * @param  double b                 - Divisor
- * @param  double onZero [optional] - Ergebnis für den Fall, daß der Divisor 0 ist (default: 0)
+ * @param  int a - first operand
+ * @param  int b - second operand
+ *
+ * @return int - multiplication result or maximum value in direction of the overflow (INT_MIN or INT_MAX)
+ */
+int Mul(int a, int b) {
+   // @see  https://www.geeksforgeeks.org/check-integer-overflow-multiplication/
+   if ( !a  ||  !b ) return(0);
+   if (a==1 || b==1) return(a * b);
+
+   int result = a * b;
+
+   if (Sign(a) == Sign(b)) {              // positive result
+      if (result > 0 && result/a == b)
+         return(result);
+      return(INT_MAX);
+   }
+   else {                                 // negative result
+      if (result < 0 && result/a == b)
+         return(result);
+      return(INT_MIN);
+   }
+}
+
+
+/**
+ * Divide two doubles and prevent a division by 0 (zero).
+ *
+ * @param  double a                 - divident
+ * @param  double b                 - divisor
+ * @param  double onZero [optional] - value to return if the the divisor is zero (default: 0)
  *
  * @return double
  */
@@ -2042,7 +1873,7 @@ string StrRightFrom(string value, string substring, int count = 1) {
          return(StrSubstr(value, start-1 + StringLen(substring)));
       }
 
-      return(_EMPTY_STR(catch("StringRightTo(1)->StringFindEx()", ERR_NOT_IMPLEMENTED)));
+      return(_EMPTY_STR(catch("StrRightFrom(1)->StringFindEx()", ERR_NOT_IMPLEMENTED)));
       //pos = StringFindEx(value, substring, count);
       //return(StrSubstr(value, pos + StringLen(substring)));
    }
@@ -2298,14 +2129,52 @@ int ArrayUnshiftString(string array[], string value) {
 
 
 /**
- * Gibt die numerische Konstante einer MovingAverage-Methode zurück.
+ * Return the integer constant of a loglevel identifier.
  *
- * @param  string value     - MA-Methode
- * @param  int    execFlags - Ausführungssteuerung: Flags der Fehler, die still gesetzt werden sollen (default: keine)
+ * @param  string value            - loglevel identifier: LOG_DEBUG | LOG_INFO | LOG_NOTICE...
+ * @param  int    flags [optional] - execution control flags (default: none)
+ *                                   F_ERR_INVALID_PARAMETER: silently handle ERR_INVALID_PARAMETER
  *
- * @return int - MA-Konstante oder -1 (EMPTY), falls ein Fehler auftrat
+ * @return int - loglevel constant oder NULL in case of errors
  */
-int StrToMaMethod(string value, int execFlags=NULL) {
+int StrToLogLevel(string value, int flags = NULL) {
+   string str = StrToUpper(StrTrim(value));
+
+   if (StrStartsWith(str, "LOG_"))
+      str = StrSubstr(str, 4);
+
+   if (str ==        "DEBUG" ) return(LOG_DEBUG );
+   if (str == ""+ LOG_DEBUG  ) return(LOG_DEBUG );
+   if (str ==        "INFO"  ) return(LOG_INFO  );
+   if (str == ""+ LOG_INFO   ) return(LOG_INFO  );
+   if (str ==        "NOTICE") return(LOG_NOTICE);
+   if (str == ""+ LOG_NOTICE ) return(LOG_NOTICE);
+   if (str ==        "WARN"  ) return(LOG_WARN  );
+   if (str == ""+ LOG_WARN   ) return(LOG_WARN  );
+   if (str ==        "ERROR" ) return(LOG_ERROR );
+   if (str == ""+ LOG_ERROR  ) return(LOG_ERROR );
+   if (str ==        "FATAL" ) return(LOG_FATAL );
+   if (str == ""+ LOG_FATAL  ) return(LOG_FATAL );
+   if (str ==        "ALL"   ) return(LOG_ALL   );       // alias for the lowest loglevel
+   if (str == ""+ LOG_ALL    ) return(LOG_ALL   );       // unreachable
+   if (str ==        "OFF"   ) return(LOG_OFF   );       //
+   if (str == ""+ LOG_OFF    ) return(LOG_OFF   );       // not a loglevel
+
+   if (flags & F_ERR_INVALID_PARAMETER && 1)
+      return(!SetLastError(ERR_INVALID_PARAMETER));
+   return(!catch("StrToLogLevel(1)  invalid parameter value: "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER));
+}
+
+
+/**
+ * Return the integer constant of a Moving-Average type representation.
+ *
+ * @param  string value            - string representation of a Moving-Average type
+ * @param  int    flags [optional] - execution control: errors to set silently (default: none)
+ *
+ * @return int - Moving-Average type constant oder -1 (EMPTY) in case of errors
+ */
+int StrToMaMethod(string value, int flags = NULL) {
    string str = StrToUpper(StrTrim(value));
 
    if (StrStartsWith(str, "MODE_"))
@@ -2313,24 +2182,18 @@ int StrToMaMethod(string value, int execFlags=NULL) {
 
    if (str ==         "SMA" ) return(MODE_SMA );
    if (str == ""+ MODE_SMA  ) return(MODE_SMA );
-   if (str ==         "LWMA") return(MODE_LWMA);
-   if (str == ""+ MODE_LWMA ) return(MODE_LWMA);
    if (str ==         "EMA" ) return(MODE_EMA );
    if (str == ""+ MODE_EMA  ) return(MODE_EMA );
+   if (str ==         "SMMA") return(MODE_SMMA);
+   if (str == ""+ MODE_SMMA ) return(MODE_SMMA);
+   if (str ==         "LWMA") return(MODE_LWMA);
+   if (str == ""+ MODE_LWMA ) return(MODE_LWMA);
    if (str ==         "ALMA") return(MODE_ALMA);
    if (str == ""+ MODE_ALMA ) return(MODE_ALMA);
 
-   if (!execFlags & F_ERR_INVALID_PARAMETER)
-      return(_EMPTY(catch("StrToMaMethod(1)  invalid parameter value = "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER)));
+   if (!flags & F_ERR_INVALID_PARAMETER)
+      return(_EMPTY(catch("StrToMaMethod(1)  invalid parameter value: "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER)));
    return(_EMPTY(SetLastError(ERR_INVALID_PARAMETER)));
-}
-
-
-/**
- * Alias
- */
-int StrToMovingAverageMethod(string value, int execFlags=NULL) {
-   return(StrToMaMethod(value, execFlags));
 }
 
 
@@ -2403,53 +2266,47 @@ datetime DateTime(int year, int month=1, int day=1, int hours=0, int minutes=0, 
 
 
 /**
- * Fix für fehlerhafte interne Funktion TimeDay()
+ * Return the day of the month of the specified time: 1...31
  *
- *
- * Gibt den Tag des Monats eines Zeitpunkts zurück (1-31).
+ * Fixes the broken builtin function TimeDay() which returns 0 instead of 1 for D'1970.01.01 00:00:00'.
  *
  * @param  datetime time
  *
  * @return int
  */
-int TimeDayFix(datetime time) {
-   if (!time)
-      return(1);
-   return(TimeDay(time));           // Fehler: 0 statt 1 für D'1970.01.01 00:00:00'
+int TimeDayEx(datetime time) {
+   if (!time) return(1);
+   return(TimeDay(time));
 }
 
 
 /**
- * Fix für fehlerhafte interne Funktion TimeDayOfWeek()
+ * Return the zero-based weekday of the specified time: 0=Sunday...6=Saturday
  *
- *
- * Gibt den Wochentag eines Zeitpunkts zurück (0=Sunday ... 6=Saturday).
+ * Fixes the broken builtin function TimeDayOfWeek() which returns 0 (Sunday) for D'1970.01.01 00:00:00' (a Thursday).
  *
  * @param  datetime time
  *
  * @return int
  */
-int TimeDayOfWeekFix(datetime time) {
-   if (!time)
-      return(3);
-   return(TimeDayOfWeek(time));     // Fehler: 0 (Sunday) statt 3 (Thursday) für D'1970.01.01 00:00:00'
+int TimeDayOfWeekEx(datetime time) {
+   if (!time) return(3);
+   return(TimeDayOfWeek(time));
 }
 
 
 /**
- * Fix für fehlerhafte interne Funktion TimeYear()
+ * Return the year of the specified time: 1970...2037
  *
- *
- * Gibt das Jahr eines Zeitpunkts zurück (1970-2037).
+ * Fixes the broken builtin function TimeYear() which returns 1900 instead of 1970 for D'1970.01.01 00:00:00'.
  *
  * @param  datetime time
  *
  * @return int
  */
-int TimeYearFix(datetime time) {
-   if (!time)
-      return(1970);
-   return(TimeYear(time));          // Fehler: 1900 statt 1970 für D'1970.01.01 00:00:00'
+int TimeYearEx(datetime time) {
+   if (!time) return(1970);
+   return(TimeYear(time));
 }
 
 
@@ -2782,7 +2639,7 @@ bool This.IsTesting() {
 
 /**
  * Whether the current program runs on a demo account. Workaround for a bug in terminal builds <= 509 where the built-in
- * function IsDemo() returns FALSE in the tester.
+ * function IsDemo() returns FALSE in tester.
  *
  * @return bool
  */
@@ -2798,27 +2655,28 @@ bool IsDemoFix() {
 
 
 /**
- * Listet alle ChildWindows eines Parent-Windows auf und schickt die Ausgabe an die Debug-Ausgabe.
+ * Enumerate all child windows of a window and send output to the system debugger.
  *
- * @param  int  hWnd                 - Handle des Parent-Windows
- * @param  bool recursive [optional] - ob die ChildWindows rekursiv aufgelistet werden sollen (default: nein)
+ * @param  int  hWnd                 - Handle of the window. If this parameter is NULL all top-level windows are enumerated.
+ * @param  bool recursive [optional] - Whether to enumerate child windows recursively (default: no).
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool EnumChildWindows(int hWnd, bool recursive = false) {
    recursive = recursive!=0;
-   if (hWnd <= 0)       return(!catch("EnumChildWindows(1)  invalid parameter hWnd="+ hWnd , ERR_INVALID_PARAMETER));
-   if (!IsWindow(hWnd)) return(!catch("EnumChildWindows(2)  not an existing window hWnd="+ IntToHexStr(hWnd), ERR_RUNTIME_ERROR));
+   if      (!hWnd)           hWnd = GetDesktopWindow();
+   else if (hWnd < 0)        return(!catch("EnumChildWindows(1)  invalid parameter hWnd: "+ hWnd , ERR_INVALID_PARAMETER));
+   else if (!IsWindow(hWnd)) return(!catch("EnumChildWindows(2)  not an existing window hWnd: "+ IntToHexStr(hWnd), ERR_INVALID_PARAMETER));
 
-   string padding, class, title;
+   string padding, wndTitle, wndClass;
    int ctrlId;
 
    static int sublevel;
    if (!sublevel) {
-      class  = GetClassName(hWnd);
-      title  = GetWindowText(hWnd);
-      ctrlId = GetDlgCtrlID(hWnd);
-      debug("EnumChildWindows(.)  "+ IntToHexStr(hWnd) +": "+ class +" \""+ title +"\""+ ifString(ctrlId, " ("+ ctrlId +")", ""));
+      wndClass = GetClassName(hWnd);
+      wndTitle = GetWindowText(hWnd);
+      ctrlId   = GetDlgCtrlID(hWnd);
+      debug("EnumChildWindows()  "+ IntToHexStr(hWnd) +": "+ wndClass +" \""+ wndTitle +"\""+ ifString(ctrlId, " ("+ ctrlId +")", ""));
    }
    sublevel++;
    padding = StrRepeat(" ", (sublevel-1)<<1);
@@ -2826,10 +2684,10 @@ bool EnumChildWindows(int hWnd, bool recursive = false) {
    int i, hWndNext=GetWindow(hWnd, GW_CHILD);
    while (hWndNext != 0) {
       i++;
-      class  = GetClassName(hWndNext);
-      title  = GetWindowText(hWndNext);
-      ctrlId = GetDlgCtrlID(hWndNext);
-      debug("EnumChildWindows(.)  "+ padding +"-> "+ IntToHexStr(hWndNext) +": "+ class +" \""+ title +"\""+ ifString(ctrlId, " ("+ ctrlId +")", ""));
+      wndClass = GetClassName(hWndNext);
+      wndTitle = GetWindowText(hWndNext);
+      ctrlId   = GetDlgCtrlID(hWndNext);
+      debug("EnumChildWindows()  "+ padding +"-> "+ IntToHexStr(hWndNext) +": "+ wndClass +" \""+ wndTitle +"\""+ ifString(ctrlId, " ("+ ctrlId +")", ""));
 
       if (recursive) {
          if (!EnumChildWindows(hWndNext, true)) {
@@ -2839,7 +2697,7 @@ bool EnumChildWindows(int hWnd, bool recursive = false) {
       }
       hWndNext = GetWindow(hWndNext, GW_HWNDNEXT);
    }
-   if (!sublevel) /*&&*/ if (!i) debug("EnumChildWindows(.)  "+ padding +"-> (no child windows)");
+   if (!sublevel && !i) debug("EnumChildWindows()  "+ padding +"-> (no child windows)");
 
    sublevel--;
    return(!catch("EnumChildWindows(3)"));
@@ -2881,10 +2739,10 @@ bool StrToBool(string value, bool strict = false) {
    if (strict) return(!catch("StrToBool(1)  cannot convert string "+ DoubleQuoteStr(value) +" to boolean (strict mode enabled)", ERR_INVALID_PARAMETER));
 
    if (value  == ""   ) return( false);
-   if (value  == "O"  ) return(_false(log("StrToBool(2)  string "+ DoubleQuoteStr(value) +" is capital letter O, assumed to be zero")));
-   if (lValue == "0n" ) return(_true (log("StrToBool(3)  string "+ DoubleQuoteStr(value) +" starts with zero, assumed to be \"On\"")));
-   if (lValue == "0ff") return(_false(log("StrToBool(4)  string "+ DoubleQuoteStr(value) +" starts with zero, assumed to be \"Off\"")));
-   if (lValue == "n0" ) return(_false(log("StrToBool(5)  string "+ DoubleQuoteStr(value) +" ends with zero, assumed to be \"no\"")));
+   if (value  == "O"  ) return(_false(logNotice("StrToBool(2)  string "+ DoubleQuoteStr(value) +" is capital letter O, assumed to be zero")));
+   if (lValue == "0n" ) return(_true (logNotice("StrToBool(3)  string "+ DoubleQuoteStr(value) +" starts with zero, assumed to be \"On\"")));
+   if (lValue == "0ff") return(_false(logNotice("StrToBool(4)  string "+ DoubleQuoteStr(value) +" starts with zero, assumed to be \"Off\"")));
+   if (lValue == "n0" ) return(_false(logNotice("StrToBool(5)  string "+ DoubleQuoteStr(value) +" ends with zero, assumed to be \"no\"")));
 
    if (StrIsNumeric(value))
       return(StrToDouble(value) != 0);
@@ -3048,9 +2906,9 @@ bool MQL.IsDirectory(string dirname) {
 
 
 /**
- * Whether the specified file exists in the MQL "files/" directory.
+ * Whether the specified file exists in the MQL "files" directory.
  *
- * @param  string filename - Filename relative to "files/", may be a symbolic link. Supported directory separators are
+ * @param  string filename - Filename relative to "files", may be a symbolic link. Supported directory separators are
  *                           forward and backward slash.
  * @return bool
  */
@@ -3070,20 +2928,18 @@ bool MQL.IsFile(string filename) {
  * @return string - directory path not ending with a slash or an empty string in case of errors
  */
 string GetMqlFilesPath() {
-   static string filesDir;
-
-   if (!StringLen(filesDir)) {
+   static string filesDir; if (!StringLen(filesDir)) {
       if (IsTesting()) {
          string dataDirectory = GetTerminalDataPathA();
-         if (!StringLen(dataDirectory))
-            return(EMPTY_STR);
+         if (!StringLen(dataDirectory)) return(EMPTY_STR);
+
          filesDir = dataDirectory +"\\tester\\files";
       }
       else {
          string mqlDirectory = GetMqlDirectoryA();
-         if (!StringLen(mqlDirectory))
-            return(EMPTY_STR);
-         filesDir = mqlDirectory  +"\\files";
+         if (!StringLen(mqlDirectory)) return(EMPTY_STR);
+
+         filesDir = mqlDirectory +"\\files";
       }
    }
    return(filesDir);
@@ -3109,6 +2965,29 @@ string StrToHexStr(string value) {
    }
 
    return(result);
+}
+
+
+/**
+ * Open the input dialog of the current program.
+ *
+ * @return int - error status
+ */
+int start.RelaunchInputDialog() {
+   int error;
+
+   if (IsExpert()) {
+      if (!IsTesting())
+         error = Chart.Expert.Properties();
+   }
+   else if (IsIndicator()) {
+      //if (!IsTesting())
+      //   error = Chart.Indicator.Properties();                     // TODO: implement
+   }
+
+   if (IsError(error))
+      SetLastError(error, NULL);
+   return(error);
 }
 
 
@@ -3147,20 +3026,20 @@ int Chart.Expert.Properties() {
 
 
 /**
- * Schickt dem aktuellen Chart einen künstlichen Tick.
+ * Send a virtual tick to the current chart.
  *
- * @param  bool sound - ob der Tick akustisch bestätigt werden soll oder nicht (default: nein)
+ * @param  bool sound [optional] - whether to audibly confirm the tick (default: no)
  *
- * @return int - Fehlerstatus
+ * @return int - error status
  */
-int Chart.SendTick(bool sound=false) {
+int Chart.SendTick(bool sound = false) {
    sound = sound!=0;
 
    int hWnd = __ExecutionContext[EC.hChart];
 
    if (!This.IsTesting()) {
-      PostMessageA(hWnd, WM_MT4(), MT4_TICK, TICK_OFFLINE_EA);    // LPARAM lParam: 0 - Expert::start() wird in Offline-Charts nicht getriggert
-   }                                                              //                1 - Expert::start() wird in Offline-Charts getriggert (bei bestehender Server-Connection)
+      PostMessageA(hWnd, WM_MT4(), MT4_TICK, TICK_OFFLINE_EA);    // LPARAM lParam: 0 - doesn't trigger Expert::start() in offline charts
+   }                                                              //                1 - triggers Expert::start() in offline charts (if a server connection is established)
    else if (Tester.IsPaused()) {
       SendMessageA(hWnd, WM_COMMAND, ID_TESTER_TICK, 0);
    }
@@ -3206,7 +3085,7 @@ int Chart.Refresh() {
  */
 bool Chart.StoreBool(string key, bool value) {
    value = value!=0;
-   if (!__CHART())  return(!catch("Chart.StoreBool(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())  return(!catch("Chart.StoreBool(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)     return(!catch("Chart.StoreBool(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3231,7 +3110,7 @@ bool Chart.StoreBool(string key, bool value) {
  * @return bool - success status
  */
 bool Chart.StoreInt(string key, int value) {
-   if (!__CHART())  return(!catch("Chart.StoreInt(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())  return(!catch("Chart.StoreInt(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)     return(!catch("Chart.StoreInt(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3256,7 +3135,7 @@ bool Chart.StoreInt(string key, int value) {
  * @return bool - success status
  */
 bool Chart.StoreColor(string key, color value) {
-   if (!__CHART())  return(!catch("Chart.StoreColor(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())  return(!catch("Chart.StoreColor(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)     return(!catch("Chart.StoreColor(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3281,7 +3160,7 @@ bool Chart.StoreColor(string key, color value) {
  * @return bool - success status
  */
 bool Chart.StoreDouble(string key, double value) {
-   if (!__CHART())  return(!catch("Chart.StoreDouble(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())  return(!catch("Chart.StoreDouble(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)     return(!catch("Chart.StoreDouble(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3306,7 +3185,7 @@ bool Chart.StoreDouble(string key, double value) {
  * @return bool - success status
  */
 bool Chart.StoreString(string key, string value) {
-   if (!__CHART())    return(!catch("Chart.StoreString(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())    return(!catch("Chart.StoreString(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)       return(!catch("Chart.StoreString(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3338,7 +3217,7 @@ bool Chart.StoreString(string key, string value) {
  * @return bool - success status
  */
 bool Chart.RestoreBool(string key, bool &var) {
-   if (!__CHART())             return(!catch("Chart.RestoreBool(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())             return(!catch("Chart.RestoreBool(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)                return(!catch("Chart.RestoreBool(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3365,7 +3244,7 @@ bool Chart.RestoreBool(string key, bool &var) {
  * @return bool - success status
  */
 bool Chart.RestoreInt(string key, int &var) {
-   if (!__CHART())             return(!catch("Chart.RestoreInt(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())             return(!catch("Chart.RestoreInt(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)                return(!catch("Chart.RestoreInt(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3390,7 +3269,7 @@ bool Chart.RestoreInt(string key, int &var) {
  * @return bool - success status
  */
 bool Chart.RestoreColor(string key, color &var) {
-   if (!__CHART())               return(!catch("Chart.RestoreColor(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())               return(!catch("Chart.RestoreColor(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)                  return(!catch("Chart.RestoreColor(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3418,7 +3297,7 @@ bool Chart.RestoreColor(string key, color &var) {
  * @return bool - success status
  */
 bool Chart.RestoreDouble(string key, double &var) {
-   if (!__CHART())               return(!catch("Chart.RestoreDouble(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())               return(!catch("Chart.RestoreDouble(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)                  return(!catch("Chart.RestoreDouble(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3443,7 +3322,7 @@ bool Chart.RestoreDouble(string key, double &var) {
  * @return bool - success status
  */
 bool Chart.RestoreString(string key, string &var) {
-   if (!__CHART())  return(!catch("Chart.RestoreString(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
+   if (!IsChart())  return(!catch("Chart.RestoreString(1)  illegal function call in the current context (no chart)", ERR_FUNC_NOT_ALLOWED));
 
    int keyLen = StringLen(key);
    if (!keyLen)     return(!catch("Chart.RestoreString(2)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3468,7 +3347,7 @@ bool Chart.RestoreString(string key, string &var) {
  * @return bool - success status
  */
 bool Chart.DeleteValue(string key) {
-   if (!__CHART())  return(true);
+   if (!IsChart())  return(true);
 
    int keyLen = StringLen(key);
    if (!keyLen)     return(!catch("Chart.DeleteValue(1)  invalid parameter key: "+ DoubleQuoteStr(key) +" (not a chart object identifier)", ERR_INVALID_PARAMETER));
@@ -3494,7 +3373,7 @@ int Tester.GetBarModel() {
 
 
 /**
- * Schaltet den Tester in den Pause-Mode. Der Aufruf ist nur im Tester möglich.
+ * Pause the tester. Must be called from within the tester.
  *
  * @param  string location [optional] - location identifier of the caller (default: none)
  *
@@ -3503,55 +3382,64 @@ int Tester.GetBarModel() {
 int Tester.Pause(string location = "") {
    if (!This.IsTesting()) return(catch("Tester.Pause(1)  Tester only function", ERR_FUNC_NOT_ALLOWED));
 
-   if (!IsVisualModeFix())
-      return(NO_ERROR);                                        // skipping
-
-   if (!IsScript() && __ExecutionContext[EC.programCoreFunction]==CF_DEINIT)
-      return(NO_ERROR);                                        // SendMessage() darf in deinit() nicht mehr benutzt werden
-
-   if (Tester.IsPaused())
-      return(NO_ERROR);                                        // skipping
+   if (!IsVisualModeFix()) return(NO_ERROR);                            // skip if VisualMode=Off
+   if (Tester.IsStopped()) return(NO_ERROR);                            // skip if already stopped
+   if (Tester.IsPaused())  return(NO_ERROR);                            // skip if already paused
 
    int hWnd = GetTerminalMainWindow();
    if (!hWnd) return(last_error);
 
-   if (__LOG()) log(location + ifString(StringLen(location), "->", "") +"Tester.Pause()");
+   if (IsLogInfo()) logInfo(location + ifString(StringLen(location), "->", "") +"Tester.Pause()");
 
-   SendMessageA(hWnd, WM_COMMAND, IDC_TESTER_SETTINGS_PAUSERESUME, 0);
-   return(NO_ERROR);
+   PostMessageA(hWnd, WM_COMMAND, IDC_TESTER_SETTINGS_PAUSERESUME, 0);
+ //SendMessageA(hWnd, WM_COMMAND, IDC_TESTER_SETTINGS_PAUSERESUME, 0);  // in deinit() SendMessage() causes a thread lock which is
+   return(NO_ERROR);                                                    // accounted for by Tester.IsStopped()
 }
 
 
 /**
- * Ob der Tester momentan pausiert. Der Aufruf ist nur im Tester selbst möglich.
+ * Stop the tester. Must be called from within the tester.
+ *
+ * @param  string location [optional] - location identifier of the caller (default: none)
+ *
+ * @return int - error status
+ */
+int Tester.Stop(string location = "") {
+   if (!IsTesting()) return(catch("Tester.Stop(1)  Tester only function", ERR_FUNC_NOT_ALLOWED));
+
+   if (Tester.IsStopped()) return(NO_ERROR);                            // skip if already stopped
+
+   if (IsLogInfo()) logInfo(location + ifString(StringLen(location), "->", "") +"Tester.Stop()");
+
+   int hWnd = GetTerminalMainWindow();
+   if (!hWnd) return(last_error);
+
+   PostMessageA(hWnd, WM_COMMAND, IDC_TESTER_SETTINGS_STARTSTOP, 0);
+ //SendMessageA(hWnd, WM_COMMAND, IDC_TESTER_SETTINGS_STARTSTOP, 0);    // in deinit() SendMessage() causes a thread lock which is
+   return(NO_ERROR);                                                    // accounted for by Tester.IsStopped()
+}
+
+
+/**
+ * Whether the tester currently pauses. Must be called from within the tester.
  *
  * @return bool
  */
 bool Tester.IsPaused() {
    if (!This.IsTesting()) return(!catch("Tester.IsPaused(1)  Tester only function", ERR_FUNC_NOT_ALLOWED));
 
-   bool testerStopped;
-   int  hWndSettings = GetDlgItem(FindTesterWindow(), IDC_TESTER_SETTINGS);
+   if (!IsVisualModeFix()) return(false);
+   if (Tester.IsStopped()) return(false);
 
-   if (IsScript()) {
-      // VisualMode=On
-      testerStopped = GetWindowText(GetDlgItem(hWndSettings, IDC_TESTER_SETTINGS_STARTSTOP)) == "Start"; // muß im Script reichen
-   }
-   else {
-      if (!IsVisualModeFix())                                                                            // EA/Indikator aus iCustom()
-         return(false);                                                                                  // Indicator::deinit() wird zeitgleich zu Expert::deinit() ausgeführt,
-      testerStopped = (IsStopped() || __ExecutionContext[EC.programCoreFunction]==CF_DEINIT);            // der EA stoppt(e) also auch
-   }
+   int hWndSettings = GetDlgItem(FindTesterWindow(), IDC_TESTER_SETTINGS);
+   int hWnd = GetDlgItem(hWndSettings, IDC_TESTER_SETTINGS_PAUSERESUME);
 
-   if (testerStopped)
-      return(false);
-
-   return(GetWindowText(GetDlgItem(hWndSettings, IDC_TESTER_SETTINGS_PAUSERESUME)) == ">>");
+   return(GetWindowText(hWnd) == ">>");
 }
 
 
 /**
- * Ob der Tester momentan gestoppt ist. Der Aufruf ist nur im Tester möglich.
+ * Whether the tester was stopped. Must be called from within the tester.
  *
  * @return bool
  */
@@ -3560,10 +3448,51 @@ bool Tester.IsStopped() {
 
    if (IsScript()) {
       int hWndSettings = GetDlgItem(FindTesterWindow(), IDC_TESTER_SETTINGS);
-      return(GetWindowText(GetDlgItem(hWndSettings, IDC_TESTER_SETTINGS_STARTSTOP)) == "Start");   // muß im Script reichen
+      return(GetWindowText(GetDlgItem(hWndSettings, IDC_TESTER_SETTINGS_STARTSTOP)) == "Start");
    }
-   return(IsStopped() || __ExecutionContext[EC.programCoreFunction]==CF_DEINIT);                   // IsStopped() war im Tester noch nie gesetzt; Indicator::deinit() wird
-}                                                                                                  // zeitgleich zu Expert::deinit() ausgeführt, der EA stoppt(e) also auch.
+   return(__ExecutionContext[EC.programCoreFunction] == CF_DEINIT);     // if in deinit() the tester was already stopped,
+}                                                                       // no matter whether in an expert or an indicator
+
+
+/**
+ * Create a new chart legend object for the current program. An existing legend object is reused.
+ *
+ * @return string - label name
+ */
+string CreateLegendLabel() {
+   if (IsSuperContext())
+      return("");
+
+   string label = "Legend."+ __ExecutionContext[EC.pid];
+   int xDistance =  5;
+   int yDistance = 21;
+
+   if (ObjectFind(label) >= 0) {
+      // reuse the existing label
+   }
+   else {
+      // create a new label
+      int objects=ObjectsTotal(), labels=ObjectsTotal(OBJ_LABEL);
+
+      for (int i=0; i < objects && labels; i++) {
+         string objName = ObjectName(i);
+         if (ObjectType(objName) == OBJ_LABEL) {
+            if (StrStartsWith(objName, "Legend."))
+               yDistance += 19;
+            labels--;
+         }
+      }
+      if (ObjectCreate(label, OBJ_LABEL, 0, 0, 0)) {
+         ObjectSet(label, OBJPROP_CORNER, CORNER_TOP_LEFT);
+         ObjectSet(label, OBJPROP_XDISTANCE, xDistance);
+         ObjectSet(label, OBJPROP_YDISTANCE, yDistance);
+      }
+      else GetLastError();
+   }
+   ObjectSetText(label, " ");
+
+   return(ifString(catch("CreateLegendLabel(1)"), "", label));
+}
 
 
 /**
@@ -3677,7 +3606,7 @@ datetime TimeServer() {
 
    if (This.IsTesting()) {
       // im Tester entspricht die Serverzeit immer der Zeit des letzten Ticks
-      serverTime = TimeCurrentEx("TimeServer(1)"); if (!serverTime) return(NULL);
+      serverTime = TimeCurrentEx("TimeServer(1)");
    }
    else {
       // Außerhalb des Testers darf TimeCurrent[Ex]() nicht verwendet werden. Der Rückgabewert ist in Kurspausen bzw. am Wochenende oder wenn keine
@@ -3765,6 +3694,38 @@ datetime TimeCurrentEx(string location="") {
 
 
 /**
+ * Format a timestamp as a string representing GMT time. MQL wrapper for the ANSI function of the MT4Expander.
+ *
+ * @param  datetime timestamp - Unix timestamp (GMT)
+ * @param  string   format    - format control string supported by strftime()
+ *
+ * @return string - GMT time string or an empty string in case of errors
+ *
+ * @see  http://www.cplusplus.com/reference/ctime/strftime/
+ * @see  ms-help://MS.VSCC.v90/MS.MSDNQTR.v90.en/dv_vccrt/html/6330ff20-4729-4c4a-82af-932915d893ea.htm
+ */
+string GmtTimeFormat(datetime timestamp, string format) {
+   return(GmtTimeFormatA(timestamp, format));
+}
+
+
+/**
+ * Format a timestamp as a string representing local time. MQL wrapper for the ANSI function of the MT4Expander.
+ *
+ * @param  datetime timestamp - Unix timestamp (GMT)
+ * @param  string   format    - format control string supported by strftime()
+ *
+ * @return string - local time string or an empty string in case of errors
+ *
+ * @see  http://www.cplusplus.com/reference/ctime/strftime/
+ * @see  ms-help://MS.VSCC.v90/MS.MSDNQTR.v90.en/dv_vccrt/html/6330ff20-4729-4c4a-82af-932915d893ea.htm
+ */
+string LocalTimeFormat(datetime timestamp, string format) {
+   return(LocalTimeFormatA(timestamp, format));
+}
+
+
+/**
  * Return a readable version of a module type flag.
  *
  * @param  int fType - combination of one or more module type flags
@@ -3844,389 +3805,145 @@ string InitReasonDescription(int reason) {
 
 
 /**
- * Gibt den Wert der extern verwalteten Assets eines Accounts zurück.
+ * Get the configured value of externally hold assets of an account. The returned value can be negative to scale-down an
+ * account's size (e.g. for testing in a real account).
  *
- * @param  string companyId - AccountCompany-Identifier
- * @param  string accountId - Account-Identifier
+ * @param  string company [optional] - account company as returned by GetAccountCompany() (default: the current account company)
+ * @param  int    account [optional] - account number (default: the current account number)
+ * @param  bool   refresh [optional] - whether to refresh a cached value (default: no)
  *
- * @return double - Wert oder EMPTY_VALUE, falls ein Fehler auftrat
+ * @return double - asset value in account currency or EMPTY_VALUE in case of errors
  */
-double GetExternalAssets(string companyId, string accountId) {
-   if (!StringLen(companyId)) return(_EMPTY_VALUE(catch("GetExternalAssets(1)  invalid parameter companyId = "+ DoubleQuoteStr(companyId), ERR_INVALID_PARAMETER)));
-   if (!StringLen(accountId)) return(_EMPTY_VALUE(catch("GetExternalAssets(2)  invalid parameter accountId = "+ DoubleQuoteStr(accountId), ERR_INVALID_PARAMETER)));
+double GetExternalAssets(string company="", int account=NULL, bool refresh=false) {
+   refresh = refresh!=0;
 
-   static string lastCompanyId;
-   static string lastAccountId;
-   static double lastAuM;
-
-   if (companyId!=lastCompanyId || accountId!=lastAccountId) {
-      double aum = RefreshExternalAssets(companyId, accountId);
-      if (IsEmptyValue(aum))
-         return(EMPTY_VALUE);
-
-      lastCompanyId = companyId;
-      lastAccountId = accountId;
-      lastAuM       = aum;
+   if (!StringLen(company) || company=="0") {
+      company = GetAccountCompany();
+      if (!StringLen(company)) return(EMPTY_VALUE);
    }
-   return(lastAuM);
+   if (account <= 0) {
+      if (account < 0) return(_EMPTY_VALUE(catch("GetExternalAssets(1)  invalid parameter account: "+ account, ERR_INVALID_PARAMETER)));
+      account = GetAccountNumber();
+      if (!account) return(EMPTY_VALUE);
+   }
+
+   static string lastCompany = "";
+   static int    lastAccount = 0;
+   static double lastResult;
+
+   if (refresh || company!=lastCompany || account!=lastAccount) {
+      string file = GetAccountConfigPath(company, account);
+      if (!StringLen(file)) return(EMPTY_VALUE);
+
+      double value = GetIniDouble(file, "General", "ExternalAssets");
+      if (IsEmptyValue(value)) return(EMPTY_VALUE);
+
+      lastCompany = company;
+      lastAccount = account;
+      lastResult  = value;
+   }
+   return(lastResult);
 }
 
 
 /**
- * Liest den Konfigurationswert der extern verwalteten Assets eines Acounts neu ein.  Der konfigurierte Wert kann negativ
- * sein, um die Accountgröße herunterzuskalieren (z.B. zum Testen einer Strategie im Real-Account).
+ * Return the identifier of the current account company. The identifier is case-insensitive and consists of alpha-numerical
+ * characters only.
  *
- * @param  string companyId - AccountCompany-Identifier
- * @param  string accountId - Account-Identifier
+ * Among others the identifier is used for reading/writing company-wide configurations and for composing log messages. It is
+ * derived from the name of the current trade server. If the trade server is not explicitely mapped to a different company
+ * identifier (see below) the returned default identifier matches the first word of the current trade server name.
  *
- * @return double - Wert oder EMPTY_VALUE, falls ein Fehler auftrat
+ * @return string - company identifier or an empty string in case of errors
+ *
+ * Example:
+ * +--------------------+----------------------------+
+ * | Trade server name  | Default company identifier |
+ * +--------------------+----------------------------+
+ * | Alpari-Standard1   | Alpari                     |
+ * +--------------------+----------------------------+
+ *
+ * Via the global framework configuration a default company indentifier can be mapped to a different one.
+ *
+ * Example:
+ * +--------------------+----------------------------+---------------------------+
+ * | Trade server name  | Default company identifier | Mapped company identifier |
+ * +--------------------+----------------------------+---------------------------+
+ * | Alpari-Standard1   | Alpari                     | -                         |
+ * | AlpariUK-Classic-1 | AlpariUK                   | Alpari                    |
+ * +--------------------+----------------------------+---------------------------+
+ *
+ * Note: For the long and elaborated company name use the built-in function AccountCompany().
  */
-double RefreshExternalAssets(string companyId, string accountId) {
-   if (!StringLen(companyId)) return(_EMPTY_VALUE(catch("RefreshExternalAssets(1)  invalid parameter companyId = "+ DoubleQuoteStr(companyId), ERR_INVALID_PARAMETER)));
-   if (!StringLen(accountId)) return(_EMPTY_VALUE(catch("RefreshExternalAssets(2)  invalid parameter accountId = "+ DoubleQuoteStr(accountId), ERR_INVALID_PARAMETER)));
-
-   string file    = GetAccountConfigPath(companyId, accountId);
-   string section = "General";
-   string key     = "AuM.Value";
-   double value   = GetIniDouble(file, section, key);
-
-   return(value);
-}
-
-
-/**
- * Ermittelt den Kurznamen der Firma des aktuellen Accounts. Der Name wird vom Namen des Trade-Servers abgeleitet, nicht vom
- * Rückgabewert von AccountCompany().
- *
- * @return string - Kurzname oder Leerstring, falls ein Fehler auftrat
- */
-string ShortAccountCompany() {
+string GetAccountCompany() {
    // Da bei Accountwechsel der Rückgabewert von AccountServer() bereits wechselt, obwohl der aktuell verarbeitete Tick noch
    // auf Daten des alten Account-Servers arbeitet, kann die Funktion AccountServer() nicht direkt verwendet werden. Statt
-   // dessen muß immer der Umweg über GetServerName() gegangen werden. Die Funktion gibt erst dann einen geänderten Servernamen
+   // dessen muß immer der Umweg über GetAccountServer() gegangen werden. Die Funktion gibt erst dann einen geänderten Servernamen
    // zurück, wenn tatsächlich ein Tick des neuen Servers verarbeitet wird.
    //
-   string server = GetServerName(); if (!StringLen(server)) return("");
-   string name = StrLeftTo(server, "-"), lName = StrToLower(name);
+   string server = GetAccountServer(); if (!StringLen(server)) return("");
+   string name = StrLeftTo(server, "-");
 
-   if (lName == "alpari"            ) return(AC.Alpari          );
-   if (lName == "alparibroker"      ) return(AC.Alpari          );
-   if (lName == "alpariuk"          ) return(AC.Alpari          );
-   if (lName == "alparius"          ) return(AC.Alpari          );
-   if (lName == "apbgtrading"       ) return(AC.APBG            );
-   if (lName == "atcbrokers"        ) return(AC.ATCBrokers      );
-   if (lName == "atcbrokersest"     ) return(AC.ATCBrokers      );
-   if (lName == "atcbrokersliq1"    ) return(AC.ATCBrokers      );
-   if (lName == "axitrader"         ) return(AC.AxiTrader       );
-   if (lName == "axitraderusa"      ) return(AC.AxiTrader       );
-   if (lName == "broco"             ) return(AC.BroCo           );
-   if (lName == "brocoinvestments"  ) return(AC.BroCo           );
-   if (lName == "cmap"              ) return(AC.ICMarkets       );     // demo
-   if (lName == "collectivefx"      ) return(AC.CollectiveFX    );
-   if (lName == "dukascopy"         ) return(AC.Dukascopy       );
-   if (lName == "easyforex"         ) return(AC.EasyForex       );
-   if (lName == "finfx"             ) return(AC.FinFX           );
-   if (lName == "forex"             ) return(AC.ForexLtd        );
-   if (lName == "forexbaltic"       ) return(AC.FBCapital       );
-   if (lName == "fxopen"            ) return(AC.FXOpen          );
-   if (lName == "fxprimus"          ) return(AC.FXPrimus        );
-   if (lName == "fxpro.com"         ) return(AC.FxPro           );
-   if (lName == "fxdd"              ) return(AC.FXDD            );
-   if (lName == "gci"               ) return(AC.GCI             );
-   if (lName == "gcmfx"             ) return(AC.Gallant         );
-   if (lName == "gftforex"          ) return(AC.GFT             );
-   if (lName == "globalprime"       ) return(AC.GlobalPrime     );
-   if (lName == "icmarkets"         ) return(AC.ICMarkets       );
-   if (lName == "inovatrade"        ) return(AC.InovaTrade      );
-   if (lName == "integral"          ) return(AC.GlobalPrime     );     // demo
-   if (lName == "investorseurope"   ) return(AC.InvestorsEurope );
-   if (lName == "jfd"               ) return(AC.JFDBrokers      );
-   if (lName == "liteforex"         ) return(AC.LiteForex       );
-   if (lName == "londoncapitalgr"   ) return(AC.LondonCapital   );
-   if (lName == "londoncapitalgroup") return(AC.LondonCapital   );
-   if (lName == "mbtrading"         ) return(AC.MBTrading       );
-   if (lName == "metaquotes"        ) return(AC.MetaQuotes      );
-   if (lName == "migbank"           ) return(AC.MIG             );
-   if (lName == "oanda"             ) return(AC.Oanda           );
-   if (lName == "pepperstone"       ) return(AC.Pepperstone     );
-   if (lName == "primexm"           ) return(AC.PrimeXM         );
-   if (lName == "sig"               ) return(AC.LiteForex       );
-   if (lName == "sts"               ) return(AC.STS             );
-   if (lName == "teletrade"         ) return(AC.TeleTrade       );
-   if (lName == "teletradecy"       ) return(AC.TeleTrade       );
-   if (lName == "tickmill"          ) return(AC.TickMill        );
-   if (lName == "xtrade"            ) return(AC.XTrade          );
-
-   debug("ShortAccountCompany(1)  unknown server name \""+ server +"\", using \""+ name +"\"");
-   return(name);
+   return(GetGlobalConfigString("AccountCompanies", name, name));
 }
 
 
 /**
- * Gibt die ID einer Account-Company zurück.
+ * Return the alias of an account. The alias is configurable via the global framework configuration and is used in outgoing
+ * log messages (SMS, email, chat) to obfuscate an actual account number. If no alias is configured the function returns the
+ * actual account number with all characters except the last 4 digits replaced by wildcards.
  *
- * @param string shortName - Kurzname der Account-Company
+ * @param  string company [optional] - account company as returned by GetAccountCompany() (default: the current account company)
+ * @param  int    account [optional] - account number (default: the current account number)
  *
- * @return int - Company-ID oder NULL, falls der übergebene Wert keine bekannte Account-Company ist
+ * @return string - account alias or an empty string in case of errors
  */
-int AccountCompanyId(string shortName) {
-   if (!StringLen(shortName))
-      return(NULL);
-
-   shortName = StrToUpper(shortName);
-
-   switch (StringGetChar(shortName, 0)) {
-      case 'A': if (shortName == StrToUpper(AC.Alpari         )) return(AC_ID.Alpari         );
-                if (shortName == StrToUpper(AC.APBG           )) return(AC_ID.APBG           );
-                if (shortName == StrToUpper(AC.ATCBrokers     )) return(AC_ID.ATCBrokers     );
-                if (shortName == StrToUpper(AC.AxiTrader      )) return(AC_ID.AxiTrader      );
-                break;
-
-      case 'B': if (shortName == StrToUpper(AC.BroCo          )) return(AC_ID.BroCo          );
-                break;
-
-      case 'C': if (shortName == StrToUpper(AC.CollectiveFX   )) return(AC_ID.CollectiveFX   );
-                break;
-
-      case 'D': if (shortName == StrToUpper(AC.Dukascopy      )) return(AC_ID.Dukascopy      );
-                break;
-
-      case 'E': if (shortName == StrToUpper(AC.EasyForex      )) return(AC_ID.EasyForex      );
-                break;
-
-      case 'F': if (shortName == StrToUpper(AC.FBCapital      )) return(AC_ID.FBCapital      );
-                if (shortName == StrToUpper(AC.FinFX          )) return(AC_ID.FinFX          );
-                if (shortName == StrToUpper(AC.ForexLtd       )) return(AC_ID.ForexLtd       );
-                if (shortName == StrToUpper(AC.FXPrimus       )) return(AC_ID.FXPrimus       );
-                if (shortName == StrToUpper(AC.FXDD           )) return(AC_ID.FXDD           );
-                if (shortName == StrToUpper(AC.FXOpen         )) return(AC_ID.FXOpen         );
-                if (shortName == StrToUpper(AC.FxPro          )) return(AC_ID.FxPro          );
-                break;
-
-      case 'G': if (shortName == StrToUpper(AC.Gallant        )) return(AC_ID.Gallant        );
-                if (shortName == StrToUpper(AC.GCI            )) return(AC_ID.GCI            );
-                if (shortName == StrToUpper(AC.GFT            )) return(AC_ID.GFT            );
-                if (shortName == StrToUpper(AC.GlobalPrime    )) return(AC_ID.GlobalPrime    );
-                break;
-
-      case 'H': break;
-
-      case 'I': if (shortName == StrToUpper(AC.ICMarkets      )) return(AC_ID.ICMarkets      );
-                if (shortName == StrToUpper(AC.InovaTrade     )) return(AC_ID.InovaTrade     );
-                if (shortName == StrToUpper(AC.InvestorsEurope)) return(AC_ID.InvestorsEurope);
-                break;
-
-      case 'J': if (shortName == StrToUpper(AC.JFDBrokers     )) return(AC_ID.JFDBrokers     );
-                break;
-
-      case 'K': break;
-
-      case 'L': if (shortName == StrToUpper(AC.LiteForex      )) return(AC_ID.LiteForex      );
-                if (shortName == StrToUpper(AC.LondonCapital  )) return(AC_ID.LondonCapital  );
-                break;
-
-      case 'M': if (shortName == StrToUpper(AC.MBTrading      )) return(AC_ID.MBTrading      );
-                if (shortName == StrToUpper(AC.MetaQuotes     )) return(AC_ID.MetaQuotes     );
-                if (shortName == StrToUpper(AC.MIG            )) return(AC_ID.MIG            );
-                break;
-
-      case 'N': break;
-
-      case 'O': if (shortName == StrToUpper(AC.Oanda          )) return(AC_ID.Oanda          );
-                break;
-
-      case 'P': if (shortName == StrToUpper(AC.Pepperstone    )) return(AC_ID.Pepperstone    );
-                if (shortName == StrToUpper(AC.PrimeXM        )) return(AC_ID.PrimeXM        );
-                break;
-
-      case 'Q': break;
-      case 'R': break;
-
-      case 'S': if (shortName == StrToUpper(AC.SimpleTrader   )) return(AC_ID.SimpleTrader   );
-                if (shortName == StrToUpper(AC.STS            )) return(AC_ID.STS            );
-                break;
-
-      case 'T': if (shortName == StrToUpper(AC.TeleTrade      )) return(AC_ID.TeleTrade      );
-                if (shortName == StrToUpper(AC.TickMill       )) return(AC_ID.TickMill       );
-                break;
-
-      case 'U': break;
-      case 'V': break;
-      case 'W': break;
-
-      case 'X': if (shortName == StrToUpper(AC.XTrade         )) return(AC_ID.XTrade         );
-                break;
-
-      case 'Y': break;
-      case 'Z': break;
+string GetAccountAlias(string company="", int account=NULL) {
+   if (!StringLen(company) || company=="0") {
+      company = GetAccountCompany();
+      if (!StringLen(company)) return(EMPTY_STR);
+   }
+   if (account <= 0) {
+      if (account < 0) return(_EMPTY_STR(catch("GetAccountAlias(1)  invalid parameter account: "+ account, ERR_INVALID_PARAMETER)));
+      account = GetAccountNumber();
+      if (!account) return(EMPTY_STR);
    }
 
-   return(NULL);
+   string result = GetGlobalConfigString("Accounts", account +".alias");
+   if (!StringLen(result)) {
+      logNotice("GetAccountAlias(2)  account alias not found for account "+ DoubleQuoteStr(company +":"+ account));
+      result = account;
+   }
+   return(result);
 }
 
 
 /**
- * Gibt den Kurznamen der Firma mit der übergebenen Company-ID zurück.
+ * Return the account number of an account alias.
  *
- * @param int id - Company-ID
+ * @param  string company - account company
+ * @param  string alias   - account alias
  *
- * @return string - Kurzname oder Leerstring, falls die übergebene ID unbekannt ist
+ * @return int - account number or NULL in case of errors or if the account alias is unknown
  */
-string ShortAccountCompanyFromId(int id) {
-   switch (id) {
-      case AC_ID.Alpari         : return(AC.Alpari         );
-      case AC_ID.APBG           : return(AC.APBG           );
-      case AC_ID.ATCBrokers     : return(AC.ATCBrokers     );
-      case AC_ID.AxiTrader      : return(AC.AxiTrader      );
-      case AC_ID.BroCo          : return(AC.BroCo          );
-      case AC_ID.CollectiveFX   : return(AC.CollectiveFX   );
-      case AC_ID.Dukascopy      : return(AC.Dukascopy      );
-      case AC_ID.EasyForex      : return(AC.EasyForex      );
-      case AC_ID.FBCapital      : return(AC.FBCapital      );
-      case AC_ID.FinFX          : return(AC.FinFX          );
-      case AC_ID.ForexLtd       : return(AC.ForexLtd       );
-      case AC_ID.FXPrimus       : return(AC.FXPrimus       );
-      case AC_ID.FXDD           : return(AC.FXDD           );
-      case AC_ID.FXOpen         : return(AC.FXOpen         );
-      case AC_ID.FxPro          : return(AC.FxPro          );
-      case AC_ID.Gallant        : return(AC.Gallant        );
-      case AC_ID.GCI            : return(AC.GCI            );
-      case AC_ID.GFT            : return(AC.GFT            );
-      case AC_ID.GlobalPrime    : return(AC.GlobalPrime    );
-      case AC_ID.ICMarkets      : return(AC.ICMarkets      );
-      case AC_ID.InovaTrade     : return(AC.InovaTrade     );
-      case AC_ID.InvestorsEurope: return(AC.InvestorsEurope);
-      case AC_ID.JFDBrokers     : return(AC.JFDBrokers     );
-      case AC_ID.LiteForex      : return(AC.LiteForex      );
-      case AC_ID.LondonCapital  : return(AC.LondonCapital  );
-      case AC_ID.MBTrading      : return(AC.MBTrading      );
-      case AC_ID.MetaQuotes     : return(AC.MetaQuotes     );
-      case AC_ID.MIG            : return(AC.MIG            );
-      case AC_ID.Oanda          : return(AC.Oanda          );
-      case AC_ID.Pepperstone    : return(AC.Pepperstone    );
-      case AC_ID.PrimeXM        : return(AC.PrimeXM        );
-      case AC_ID.SimpleTrader   : return(AC.SimpleTrader   );
-      case AC_ID.STS            : return(AC.STS            );
-      case AC_ID.TeleTrade      : return(AC.TeleTrade      );
-      case AC_ID.TickMill       : return(AC.TickMill       );
-      case AC_ID.XTrade         : return(AC.XTrade         );
-   }
-   return("");
-}
+int GetAccountNumberFromAlias(string company, string alias) {
+   if (!StringLen(company)) return(!catch("GetAccountNumberFromAlias(1)  invalid parameter company: \"\"", ERR_INVALID_PARAMETER));
+   if (!StringLen(alias))   return(!catch("GetAccountNumberFromAlias(2)  invalid parameter alias: \"\"", ERR_INVALID_PARAMETER));
 
+   string file = GetGlobalConfigPathA(); if (!StringLen(file)) return(NULL);
+   string section = "Accounts";
+   string keys[], value, sAccount;
+   int keysSize = GetIniKeys(file, section, keys);
 
-/**
- * Ob der übergebene Wert einen bekannten Kurznamen einer AccountCompany darstellt.
- *
- * @param string value
- *
- * @return bool
- */
-bool IsShortAccountCompany(string value) {
-   return(AccountCompanyId(value) != 0);
-}
-
-
-/**
- * Gibt den Alias eines Accounts zurück.
- *
- * @param  string accountCompany
- * @param  int    accountNumber
- *
- * @return string - Alias oder Leerstring, falls der Account unbekannt ist
- */
-string AccountAlias(string accountCompany, int accountNumber) {
-   if (!StringLen(accountCompany)) return(_EMPTY_STR(catch("AccountAlias(1)  invalid parameter accountCompany = \"\"", ERR_INVALID_PARAMETER)));
-   if (accountNumber <= 0)         return(_EMPTY_STR(catch("AccountAlias(2)  invalid parameter accountNumber = "+ accountNumber, ERR_INVALID_PARAMETER)));
-
-   if (StrCompareI(accountCompany, AC.SimpleTrader)) {
-      // SimpleTrader-Account
-      switch (accountNumber) {
-         case STA_ID.AlexProfit      : return(STA_ALIAS.AlexProfit      );
-         case STA_ID.ASTA            : return(STA_ALIAS.ASTA            );
-         case STA_ID.Caesar2         : return(STA_ALIAS.Caesar2         );
-         case STA_ID.Caesar21        : return(STA_ALIAS.Caesar21        );
-         case STA_ID.ConsistentProfit: return(STA_ALIAS.ConsistentProfit);
-         case STA_ID.DayFox          : return(STA_ALIAS.DayFox          );
-         case STA_ID.FXViper         : return(STA_ALIAS.FXViper         );
-         case STA_ID.GCEdge          : return(STA_ALIAS.GCEdge          );
-         case STA_ID.GoldStar        : return(STA_ALIAS.GoldStar        );
-         case STA_ID.Kilimanjaro     : return(STA_ALIAS.Kilimanjaro     );
-         case STA_ID.NovoLRfund      : return(STA_ALIAS.NovoLRfund      );
-         case STA_ID.OverTrader      : return(STA_ALIAS.OverTrader      );
-         case STA_ID.Ryan            : return(STA_ALIAS.Ryan            );
-         case STA_ID.SmartScalper    : return(STA_ALIAS.SmartScalper    );
-         case STA_ID.SmartTrader     : return(STA_ALIAS.SmartTrader     );
-         case STA_ID.SteadyCapture   : return(STA_ALIAS.SteadyCapture   );
-         case STA_ID.Twilight        : return(STA_ALIAS.Twilight        );
-         case STA_ID.YenFortress     : return(STA_ALIAS.YenFortress     );
-      }
-   }
-   else {
-      // regulärer Account
-      string section = "Accounts";
-      string key     = accountNumber +".alias";
-      string value   = GetGlobalConfigString(section, key);
-      if (StringLen(value) > 0)
-         return(value);
-   }
-
-   return("");
-}
-
-
-/**
- * Gibt die Account-Nummer eines Accounts anhand seines Aliasses zurück.
- *
- * @param  string accountCompany
- * @param  string accountAlias
- *
- * @return int - Account-Nummer oder NULL, falls der Account unbekannt ist oder ein Fehler auftrat
- */
-int AccountNumberFromAlias(string accountCompany, string accountAlias) {
-   if (!StringLen(accountCompany)) return(_NULL(catch("AccountNumberFromAlias(1)  invalid parameter accountCompany = \"\"", ERR_INVALID_PARAMETER)));
-   if (!StringLen(accountAlias))   return(_NULL(catch("AccountNumberFromAlias(2)  invalid parameter accountAlias = \"\"", ERR_INVALID_PARAMETER)));
-
-   if (StrCompareI(accountCompany, AC.SimpleTrader)) {
-      // SimpleTrader-Account
-      accountAlias = StrToLower(accountAlias);
-
-      if (accountAlias == StrToLower(STA_ALIAS.AlexProfit      )) return(STA_ID.AlexProfit      );
-      if (accountAlias == StrToLower(STA_ALIAS.ASTA            )) return(STA_ID.ASTA            );
-      if (accountAlias == StrToLower(STA_ALIAS.Caesar2         )) return(STA_ID.Caesar2         );
-      if (accountAlias == StrToLower(STA_ALIAS.Caesar21        )) return(STA_ID.Caesar21        );
-      if (accountAlias == StrToLower(STA_ALIAS.ConsistentProfit)) return(STA_ID.ConsistentProfit);
-      if (accountAlias == StrToLower(STA_ALIAS.DayFox          )) return(STA_ID.DayFox          );
-      if (accountAlias == StrToLower(STA_ALIAS.FXViper         )) return(STA_ID.FXViper         );
-      if (accountAlias == StrToLower(STA_ALIAS.GCEdge          )) return(STA_ID.GCEdge          );
-      if (accountAlias == StrToLower(STA_ALIAS.GoldStar        )) return(STA_ID.GoldStar        );
-      if (accountAlias == StrToLower(STA_ALIAS.Kilimanjaro     )) return(STA_ID.Kilimanjaro     );
-      if (accountAlias == StrToLower(STA_ALIAS.NovoLRfund      )) return(STA_ID.NovoLRfund      );
-      if (accountAlias == StrToLower(STA_ALIAS.OverTrader      )) return(STA_ID.OverTrader      );
-      if (accountAlias == StrToLower(STA_ALIAS.Ryan            )) return(STA_ID.Ryan            );
-      if (accountAlias == StrToLower(STA_ALIAS.SmartScalper    )) return(STA_ID.SmartScalper    );
-      if (accountAlias == StrToLower(STA_ALIAS.SmartTrader     )) return(STA_ID.SmartTrader     );
-      if (accountAlias == StrToLower(STA_ALIAS.SteadyCapture   )) return(STA_ID.SteadyCapture   );
-      if (accountAlias == StrToLower(STA_ALIAS.Twilight        )) return(STA_ID.Twilight        );
-      if (accountAlias == StrToLower(STA_ALIAS.YenFortress     )) return(STA_ID.YenFortress     );
-   }
-   else {
-      // regulärer Account
-      string file    = GetGlobalConfigPathA(); if (!StringLen(file)) return(NULL);
-      string section = "Accounts";
-      string keys[], value, sAccount;
-      int keysSize = GetIniKeys(file, section, keys);
-
-      for (int i=0; i < keysSize; i++) {
-         if (StrEndsWithI(keys[i], ".alias")) {
-            value = GetGlobalConfigString(section, keys[i]);
-            if (StrCompareI(value, accountAlias)) {
-               sAccount = StringTrimRight(StrLeft(keys[i], -6));
-               value    = GetGlobalConfigString(section, sAccount +".company");
-               if (StrCompareI(value, accountCompany)) {
-                  if (StrIsDigit(sAccount))
-                     return(StrToInteger(sAccount));
-               }
+   for (int i=0; i < keysSize; i++) {
+      if (StrEndsWithI(keys[i], ".alias")) {
+         value = GetGlobalConfigString(section, keys[i]);
+         if (StrCompareI(value, alias)) {
+            sAccount = StringTrimRight(StrLeft(keys[i], -6));
+            value    = GetGlobalConfigString(section, sAccount +".company");
+            if (StrCompareI(value, company)) {
+               if (StrIsDigit(sAccount))
+                  return(StrToInteger(sAccount));
             }
          }
       }
@@ -4678,16 +4395,14 @@ color NameToColor(string name) {
 /**
  * Repeats a string.
  *
- * @param  string input - The string to be repeated.
- * @param  int    times - Number of times the input string should be repeated.
+ * @param  string input - string to be repeated
+ * @param  int    times - number of times to repeat the string
  *
- * @return string - the repeated string
+ * @return string - the repeated string or an empty string in case of errors
  */
 string StrRepeat(string input, int times) {
-   if (times < 0)
-      return(_EMPTY_STR(catch("StrRepeat(1)  invalid parameter times = "+ times, ERR_INVALID_PARAMETER)));
-
-   if (times ==  0)       return("");
+   if (times < 0)         return(_EMPTY_STR(catch("StrRepeat(1)  invalid parameter times: "+ times, ERR_INVALID_PARAMETER)));
+   if (!times)            return("");
    if (!StringLen(input)) return("");
 
    string output = input;
@@ -4737,7 +4452,7 @@ int GetCurrencyId(string currency) {
    if (value == C_USD) return(CID_USD);
    if (value == C_ZAR) return(CID_ZAR);
 
-   return(_NULL(catch("GetCurrencyId(1)  unknown currency = \""+ currency +"\"", ERR_RUNTIME_ERROR)));
+   return(_NULL(catch("GetCurrencyId(1)  unknown currency: \""+ currency +"\"", ERR_RUNTIME_ERROR)));
 }
 
 
@@ -4779,7 +4494,7 @@ string GetCurrency(int id) {
       case CID_USD: return(C_USD);
       case CID_ZAR: return(C_ZAR);
    }
-   return(_EMPTY_STR(catch("GetCurrency(1)  unknown currency id = "+ id, ERR_RUNTIME_ERROR)));
+   return(_EMPTY_STR(catch("GetCurrency(1)  unknown currency id: "+ id, ERR_RUNTIME_ERROR)));
 }
 
 
@@ -4991,7 +4706,7 @@ int StrToOperationType(string value) {
       if (str == "CREDIT"    ) return(OP_CREDIT   );
    }
 
-   if (__LOG()) log("StrToOperationType(1)  invalid parameter value = \""+ value +"\" (not an operation type)", ERR_INVALID_PARAMETER);
+   if (IsLogInfo()) logInfo("StrToOperationType(1)  invalid parameter value = \""+ value +"\" (not an operation type)", ERR_INVALID_PARAMETER);
    return(OP_UNDEFINED);
 }
 
@@ -4999,28 +4714,42 @@ int StrToOperationType(string value) {
 /**
  * Return the integer constant of a trade direction identifier.
  *
- * @param  string value     - trade directions: [TRADE_DIRECTION_][LONG|SHORT|BOTH]
- * @param  int    execFlags - execution control: error flags to set silently (default: none)
+ * @param  string value            - string representation of a trade direction: [TRADE_DIRECTION_](LONG|SHORT|BOTH)
+ * @param  int    flags [optional] - execution control flags (default: none)
+ *                                   F_PARTIAL_ID:            recognize partial but unique identifiers, e.g. "L" = "Long"
+ *                                   F_ERR_INVALID_PARAMETER: set ERR_INVALID_PARAMETER silently
  *
  * @return int - trade direction constant or -1 (EMPTY) if the value is not recognized
  */
-int StrToTradeDirection(string value, int execFlags=NULL) {
+int StrToTradeDirection(string value, int flags = NULL) {
    string str = StrToUpper(StrTrim(value));
 
-   if (StrStartsWith(str, "TRADE_DIRECTION_"))
-      str = StrSubstr(str, 17);
+   if (StrStartsWith(str, "TRADE_DIRECTION_")) {
+      flags &= (~F_PARTIAL_ID);                                // TRADE_DIRECTION_* doesn't support the F_PARTIAL_ID flag
+      if (str == "TRADE_DIRECTION_LONG" ) return(TRADE_DIRECTION_LONG );
+      if (str == "TRADE_DIRECTION_SHORT") return(TRADE_DIRECTION_SHORT);
+      if (str == "TRADE_DIRECTION_BOTH" ) return(TRADE_DIRECTION_BOTH );
+   }
+   else if (StringLen(str) > 0) {
+      if (str == ""+ TRADE_DIRECTION_LONG ) return(TRADE_DIRECTION_LONG );
+      if (str == ""+ TRADE_DIRECTION_SHORT) return(TRADE_DIRECTION_SHORT);
+      if (str == ""+ TRADE_DIRECTION_BOTH ) return(TRADE_DIRECTION_BOTH );
 
-   if (str ==                    "LONG" ) return(TRADE_DIRECTION_LONG);
-   if (str == ""+ TRADE_DIRECTION_LONG  ) return(TRADE_DIRECTION_LONG);
+      if (flags & F_PARTIAL_ID && 1) {
+         if (StrStartsWith("LONG",  str)) return(TRADE_DIRECTION_LONG );
+         if (StrStartsWith("SHORT", str)) return(TRADE_DIRECTION_SHORT);
+         if (StrStartsWith("BOTH",  str)) return(TRADE_DIRECTION_BOTH );
+      }
+      else {
+         if (str == "LONG" ) return(TRADE_DIRECTION_LONG );
+         if (str == "SHORT") return(TRADE_DIRECTION_SHORT);
+         if (str == "BOTH" ) return(TRADE_DIRECTION_BOTH );
+      }
+   }
 
-   if (str ==                    "SHORT") return(TRADE_DIRECTION_SHORT);
-   if (str == ""+ TRADE_DIRECTION_SHORT ) return(TRADE_DIRECTION_SHORT);
-
-   if (str ==                    "BOTH" ) return(TRADE_DIRECTION_BOTH);
-   if (str == ""+ TRADE_DIRECTION_BOTH  ) return(TRADE_DIRECTION_BOTH);
-
-   if (!execFlags & F_ERR_INVALID_PARAMETER) return(_EMPTY(catch("StrToTradeDirection(1)  invalid parameter value = "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER)));
-   else                                      return(_EMPTY(SetLastError(ERR_INVALID_PARAMETER)));
+   if (flags & F_ERR_INVALID_PARAMETER && 1) SetLastError(ERR_INVALID_PARAMETER);
+   else                                      catch("StrToTradeDirection(1)  invalid parameter value: "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER);
+   return(-1);
 }
 
 
@@ -5207,13 +4936,178 @@ string NumberToStr(double value, string mask) {
 
 
 /**
- * Gibt das Timeframe-Flag der angegebenen Chartperiode zurück.
+ * Parse the string representation of a date value.
  *
- * @param  int period - Timeframe-Identifier (default: Periode des aktuellen Charts)
+ * @param  string value - format: "yyyy.mm.dd"
  *
- * @return int - Timeframe-Flag
+ * @return datetime - datetime value or NaT (not-a-time) in case of errors
  */
-int PeriodFlag(int period=NULL) {
+datetime ParseDate(string value) {
+   string sValues[], origValue=value;
+   value = StrTrim(value);
+   if (!StringLen(value))                                  return(_NaT(catch("ParseDate(1)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+   int sizeOfValues = Explode(value, ".", sValues, NULL);
+   if (sizeOfValues != 3)                                  return(_NaT(catch("ParseDate(2)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+
+   // parse year: YYYY
+   string sYY = StrTrim(sValues[0]);
+   if (StringLen(sYY)!=4 || !StrIsDigit(sYY))              return(_NaT(catch("ParseDate(3)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+   int iYY = StrToInteger(sYY);
+   if (iYY < 1970 || iYY > 2037)                           return(_NaT(catch("ParseDate(4)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+
+   // parse month: MM
+   string sMM = StrTrim(sValues[1]);
+   if (StringLen(sMM) > 2 || !StrIsDigit(sMM))             return(_NaT(catch("ParseDate(5)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+   int iMM = StrToInteger(sMM);
+   if (iMM < 1 || iMM > 12)                                return(_NaT(catch("ParseDate(6)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+
+   // parse day: DD
+   string sDD = StrTrim(sValues[2]);
+   if (StringLen(sDD) > 2 || !StrIsDigit(sDD))             return(_NaT(catch("ParseDate(7)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+   int iDD = StrToInteger(sDD);
+   if (iDD < 1 || iDD > 31)                                return(_NaT(catch("ParseDate(8)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+   if (iDD > 28) {
+      if (iMM == FEB) {
+         if (iDD > 29 || !IsLeapYear(iYY))                 return(_NaT(catch("ParseDate(9)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+      }
+      else if (iDD == 31) {
+         if (iMM==APR || iMM==JUN || iMM==SEP || iMM==NOV) return(_NaT(catch("ParseDate(10)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date)", ERR_INVALID_PARAMETER)));
+      }
+   }
+   return(DateTime(iYY, iMM, iDD));
+}
+
+
+/**
+ * Parse the string representation of a date or datetime value.
+ *
+ * @param  string value - format: "yyyy.mm.dd [hh:ii[:ss]]" with optional time part
+ *
+ * @return datetime - datetime value or NaT (Not-a-Time) in case of errors
+ */
+datetime ParseDateTime(string value) {
+   string sValues[], origValue=value;
+   value = StrTrim(value);
+   if (!StringLen(value))                                  return(_NaT(catch("ParseDateTime(1)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+   int sizeOfValues = Explode(value, ".", sValues, NULL);
+   if (sizeOfValues != 3)                                  return(_NaT(catch("ParseDateTime(2)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+
+   // parse year: yyyy
+   string sYY = StrTrim(sValues[0]);
+   if (StringLen(sYY)!=4 || !StrIsDigit(sYY))              return(_NaT(catch("ParseDateTime(3)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+   int iYY = StrToInteger(sYY);
+   if (iYY < 1970 || iYY > 2037)                           return(_NaT(catch("ParseDateTime(4)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+
+   // parse month: mm
+   string sMM = StrTrim(sValues[1]);
+   if (StringLen(sMM) > 2 || !StrIsDigit(sMM))             return(_NaT(catch("ParseDateTime(5)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+   int iMM = StrToInteger(sMM);
+   if (iMM < 1 || iMM > 12)                                return(_NaT(catch("ParseDateTime(6)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+   sValues[2]   = StrTrim(sValues[2]);
+   string sDD   = StrLeftTo(sValues[2], " ");
+   string sTime = StrTrim(StrRight(sValues[2], -StringLen(sDD)));
+
+   // parse day: dd
+   sDD = StrTrim(sDD);
+   if (StringLen(sDD) > 2 || !StrIsDigit(sDD))             return(_NaT(catch("ParseDateTime(7)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+   int iDD = StrToInteger(sDD);
+   if (iDD < 1 || iDD > 31)                                return(_NaT(catch("ParseDateTime(8)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+   if (iDD > 28) {
+      if (iMM == FEB) {
+         if (iDD > 29 || !IsLeapYear(iYY))                 return(_NaT(catch("ParseDateTime(9)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+      }
+      else if (iDD == 31) {
+         if (iMM==APR || iMM==JUN || iMM==SEP || iMM==NOV) return(_NaT(catch("ParseDateTime(10)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+      }
+   }
+
+   // parse time: hh:ii[:ss]
+   int iHH=0, iII=0, iSS=0;
+   if (StringLen(sTime) > 0) {
+      sizeOfValues = Explode(sTime, ":", sValues, NULL);
+      if (sizeOfValues < 2 || sizeOfValues > 3)            return(_NaT(catch("ParseDateTime(11)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+
+      string sHH = StrTrim(sValues[0]);
+      if (StringLen(sHH) > 2 || !StrIsDigit(sHH))          return(_NaT(catch("ParseDateTime(12)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+      iHH = StrToInteger(sHH);
+      if (iHH < 0 || iHH > 23)                             return(_NaT(catch("ParseDateTime(13)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+
+      string sII = StrTrim(sValues[1]);
+      if (StringLen(sII) > 2 || !StrIsDigit(sII))          return(_NaT(catch("ParseDateTime(14)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+      iII = StrToInteger(sII);
+      if (iII < 0 || iII > 59)                             return(_NaT(catch("ParseDateTime(15)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+      if (sizeOfValues == 3) {
+         string sSS = StrTrim(sValues[2]);
+         if (StringLen(sSS) > 2 || !StrIsDigit(sSS))       return(_NaT(catch("ParseDateTime(16)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+         iSS = StrToInteger(sSS);
+         if (iSS < 0 || iSS > 59)                          return(_NaT(catch("ParseDateTime(17)  invalid parameter value: "+ DoubleQuoteStr(origValue) +" (not a date/time)", ERR_INVALID_PARAMETER)));
+      }
+   }
+   return(DateTime(iYY, iMM, iDD, iHH, iII, iSS));
+}
+
+
+/**
+ * Return the description of a loglevel constant.
+ *
+ * @param  int level - loglevel
+ *
+ * @return string
+ */
+string LoglevelDescription(int level) {
+   switch (level) {
+      case LOG_DEBUG : return("DEBUG" );
+      case LOG_INFO  : return("INFO"  );
+      case LOG_NOTICE: return("NOTICE");
+      case LOG_WARN  : return("WARN"  );
+      case LOG_ERROR : return("ERROR" );
+      case LOG_FATAL : return("FATAL" );
+      case LOG_OFF   : return("OFF"   );        // not a regular loglevel
+   }
+   return(""+ level);
+}
+
+
+/**
+ * Return the description of a timeframe identifier. Supports custom timeframes.
+ *
+ * @param  int period - timeframe identifier or amount of minutes per bar period
+ *
+ * @return string
+ *
+ * Note: Implemented in MQL and in MT4Expander to be available if DLL calls are disabled.
+ */
+string PeriodDescription(int period) {
+   if (!period) period = Period();
+
+   switch (period) {
+      case PERIOD_M1 : return("M1" );     // 1 minute
+      case PERIOD_M5 : return("M5" );     // 5 minutes
+      case PERIOD_M15: return("M15");     // 15 minutes
+      case PERIOD_M30: return("M30");     // 30 minutes
+      case PERIOD_H1 : return("H1" );     // 1 hour
+      case PERIOD_H2 : return("H2" );     // 2 hours (custom timeframe)
+      case PERIOD_H3 : return("H3" );     // 3 hours (custom timeframe)
+      case PERIOD_H4 : return("H4" );     // 4 hours
+      case PERIOD_H6 : return("H6" );     // 6 hours (custom timeframe)
+      case PERIOD_H8 : return("H8" );     // 8 hours (custom timeframe)
+      case PERIOD_D1 : return("D1" );     // 1 day
+      case PERIOD_W1 : return("W1" );     // 1 week
+      case PERIOD_MN1: return("MN1");     // 1 month
+      case PERIOD_Q1 : return("Q1" );     // 1 quarter (custom timeframe)
+   }
+   return(""+ period);
+}
+
+
+/**
+ * Return the flag for the specified timeframe identifier. Supports custom timeframes.
+ *
+ * @param  int period [optional] - timeframe identifier (default: timeframe of the current chart)
+ *
+ * @return int - timeframe flag
+ */
+int PeriodFlag(int period = NULL) {
    if (period == NULL)
       period = Period();
 
@@ -5223,7 +5117,11 @@ int PeriodFlag(int period=NULL) {
       case PERIOD_M15: return(F_PERIOD_M15);
       case PERIOD_M30: return(F_PERIOD_M30);
       case PERIOD_H1 : return(F_PERIOD_H1 );
+      case PERIOD_H2 : return(F_PERIOD_H2 );
+      case PERIOD_H3 : return(F_PERIOD_H3 );
       case PERIOD_H4 : return(F_PERIOD_H4 );
+      case PERIOD_H6 : return(F_PERIOD_H6 );
+      case PERIOD_H8 : return(F_PERIOD_H8 );
       case PERIOD_D1 : return(F_PERIOD_D1 );
       case PERIOD_W1 : return(F_PERIOD_W1 );
       case PERIOD_MN1: return(F_PERIOD_MN1);
@@ -5234,44 +5132,62 @@ int PeriodFlag(int period=NULL) {
 
 
 /**
- * Alias
+ * Alias of PeriodFlag()
  *
- * Gibt das Timeframe-Flag des angegebenen Timeframes zurück.
+ * Return the flag for the specified timeframe identifier. Supports custom timeframes.
  *
- * @param  int timeframe - Timeframe-Identifier (default: Timeframe des aktuellen Charts)
+ * @param  int period [optional] - timeframe identifier (default: timeframe of the current chart)
  *
- * @return int - Timeframe-Flag
+ * @return int - timeframe flag
  */
-int TimeframeFlag(int timeframe=NULL) {
+int TimeframeFlag(int timeframe = NULL) {
    return(PeriodFlag(timeframe));
 }
 
 
 /**
- * Gibt die lesbare Version ein oder mehrerer Timeframe-Flags zurück.
+ * Return a human-readable representation of a timeframe flag. Supports custom timeframes.
  *
- * @param  int flags - Kombination verschiedener Timeframe-Flags
+ * @param  int flag - combination of timeframe flags
  *
  * @return string
  */
-string PeriodFlagsToStr(int flags) {
+string PeriodFlagToStr(int flag) {
    string result = "";
 
-   if (!flags)                    result = StringConcatenate(result, "|NULL");
-   if (flags & F_PERIOD_M1  && 1) result = StringConcatenate(result, "|M1"  );
-   if (flags & F_PERIOD_M5  && 1) result = StringConcatenate(result, "|M5"  );
-   if (flags & F_PERIOD_M15 && 1) result = StringConcatenate(result, "|M15" );
-   if (flags & F_PERIOD_M30 && 1) result = StringConcatenate(result, "|M30" );
-   if (flags & F_PERIOD_H1  && 1) result = StringConcatenate(result, "|H1"  );
-   if (flags & F_PERIOD_H4  && 1) result = StringConcatenate(result, "|H4"  );
-   if (flags & F_PERIOD_D1  && 1) result = StringConcatenate(result, "|D1"  );
-   if (flags & F_PERIOD_W1  && 1) result = StringConcatenate(result, "|W1"  );
-   if (flags & F_PERIOD_MN1 && 1) result = StringConcatenate(result, "|MN1" );
-   if (flags & F_PERIOD_Q1  && 1) result = StringConcatenate(result, "|Q1"  );
+   if (!flag)                    result = StringConcatenate(result, "|NULL");
+   if (flag & F_PERIOD_M1  && 1) result = StringConcatenate(result, "|F_PERIOD_M1"  );
+   if (flag & F_PERIOD_M5  && 1) result = StringConcatenate(result, "|F_PERIOD_M5"  );
+   if (flag & F_PERIOD_M15 && 1) result = StringConcatenate(result, "|F_PERIOD_M15" );
+   if (flag & F_PERIOD_M30 && 1) result = StringConcatenate(result, "|F_PERIOD_M30" );
+   if (flag & F_PERIOD_H1  && 1) result = StringConcatenate(result, "|F_PERIOD_H1"  );
+   if (flag & F_PERIOD_H2  && 1) result = StringConcatenate(result, "|F_PERIOD_H2"  );
+   if (flag & F_PERIOD_H3  && 1) result = StringConcatenate(result, "|F_PERIOD_H3"  );
+   if (flag & F_PERIOD_H4  && 1) result = StringConcatenate(result, "|F_PERIOD_H4"  );
+   if (flag & F_PERIOD_H6  && 1) result = StringConcatenate(result, "|F_PERIOD_H6"  );
+   if (flag & F_PERIOD_H8  && 1) result = StringConcatenate(result, "|F_PERIOD_H8"  );
+   if (flag & F_PERIOD_D1  && 1) result = StringConcatenate(result, "|F_PERIOD_D1"  );
+   if (flag & F_PERIOD_W1  && 1) result = StringConcatenate(result, "|F_PERIOD_W1"  );
+   if (flag & F_PERIOD_MN1 && 1) result = StringConcatenate(result, "|F_PERIOD_MN1" );
+   if (flag & F_PERIOD_Q1  && 1) result = StringConcatenate(result, "|F_PERIOD_Q1"  );
 
    if (StringLen(result) > 0)
       result = StrSubstr(result, 1);
    return(result);
+}
+
+
+/**
+ * Alias of PeriodFlagToStr()
+ *
+ * Return a human-readable representation of a timeframe flag. Supports custom timeframes.
+ *
+ * @param  int flag - combination of timeframe flags
+ *
+ * @return string
+ */
+string TimeframeFlagToStr(int flag) {
+   return(PeriodFlagToStr(flag));
 }
 
 
@@ -5301,108 +5217,127 @@ string HistoryFlagsToStr(int flags) {
  * Return the integer constant of a price type identifier.
  *
  * @param  string value
- * @param  int    execFlags [optional] - control execution: errors to set silently (default: none)
+ * @param  int    flags [optional] - execution control flags (default: none)
+ *                                   F_PARTIAL_ID:            recognize partial but unique identifiers, e.g. "Med" = "Median"
+ *                                   F_ERR_INVALID_PARAMETER: set ERR_INVALID_PARAMETER silently
  *
  * @return int - price type constant or -1 (EMPTY) if the value is not recognized
  */
-int StrToPriceType(string value, int execFlags = NULL) {
+int StrToPriceType(string value, int flags = NULL) {
    string str = StrToUpper(StrTrim(value));
 
-   if (StringLen(str) == 1) {
-      if (str == "O"               ) return(PRICE_OPEN    );      // capital letter O
-      if (str == ""+ PRICE_OPEN    ) return(PRICE_OPEN    );
-      if (str == "H"               ) return(PRICE_HIGH    );
+   if (StrStartsWith(str, "PRICE_")) {
+      flags &= (~F_PARTIAL_ID);                                // PRICE_* doesn't support the F_PARTIAL_ID flag
+      if (str == "PRICE_OPEN"    ) return(PRICE_OPEN    );
+      if (str == "PRICE_HIGH"    ) return(PRICE_HIGH    );
+      if (str == "PRICE_LOW"     ) return(PRICE_LOW     );
+      if (str == "PRICE_CLOSE"   ) return(PRICE_CLOSE   );
+      if (str == "PRICE_MEDIAN"  ) return(PRICE_MEDIAN  );
+      if (str == "PRICE_TYPICAL" ) return(PRICE_TYPICAL );
+      if (str == "PRICE_WEIGHTED") return(PRICE_WEIGHTED);
+      if (str == "PRICE_AVERAGE" ) return(PRICE_AVERAGE );
+      if (str == "PRICE_BID"     ) return(PRICE_BID     );
+      if (str == "PRICE_ASK"     ) return(PRICE_ASK     );
+   }
+   else if (StringLen(str) > 0) {
+      if (str == ""+ PRICE_OPEN    ) return(PRICE_OPEN    );   // check for numeric identifiers
       if (str == ""+ PRICE_HIGH    ) return(PRICE_HIGH    );
-      if (str == "L"               ) return(PRICE_LOW     );
       if (str == ""+ PRICE_LOW     ) return(PRICE_LOW     );
-      if (str == "C"               ) return(PRICE_CLOSE   );
       if (str == ""+ PRICE_CLOSE   ) return(PRICE_CLOSE   );
-      if (str == "M"               ) return(PRICE_MEDIAN  );
       if (str == ""+ PRICE_MEDIAN  ) return(PRICE_MEDIAN  );
-      if (str == "T"               ) return(PRICE_TYPICAL );
       if (str == ""+ PRICE_TYPICAL ) return(PRICE_TYPICAL );
-      if (str == "W"               ) return(PRICE_WEIGHTED);
       if (str == ""+ PRICE_WEIGHTED) return(PRICE_WEIGHTED);
-      if (str == "B"               ) return(PRICE_BID     );
+      if (str == ""+ PRICE_AVERAGE ) return(PRICE_AVERAGE );
       if (str == ""+ PRICE_BID     ) return(PRICE_BID     );
-      if (str == "A"               ) return(PRICE_ASK     );
       if (str == ""+ PRICE_ASK     ) return(PRICE_ASK     );
-   }
-   else {
-      if (StrStartsWith(str, "PRICE_"))
-         str = StrSubstr(str, 6);
 
-      if (str == "OPEN"            ) return(PRICE_OPEN    );
-      if (str == "HIGH"            ) return(PRICE_HIGH    );
-      if (str == "LOW"             ) return(PRICE_LOW     );
-      if (str == "CLOSE"           ) return(PRICE_CLOSE   );
-      if (str == "MEDIAN"          ) return(PRICE_MEDIAN  );
-      if (str == "TYPICAL"         ) return(PRICE_TYPICAL );
-      if (str == "WEIGHTED"        ) return(PRICE_WEIGHTED);
-      if (str == "BID"             ) return(PRICE_BID     );
-      if (str == "ASK"             ) return(PRICE_ASK     );
+      if (flags & F_PARTIAL_ID && 1) {
+         if (StrStartsWith("OPEN",     str))   return(PRICE_OPEN    );
+         if (StrStartsWith("HIGH",     str))   return(PRICE_HIGH    );
+         if (StrStartsWith("LOW",      str))   return(PRICE_LOW     );
+         if (StrStartsWith("CLOSE",    str))   return(PRICE_CLOSE   );
+         if (StrStartsWith("MEDIAN",   str))   return(PRICE_MEDIAN  );
+         if (StrStartsWith("TYPICAL",  str))   return(PRICE_TYPICAL );
+         if (StrStartsWith("WEIGHTED", str))   return(PRICE_WEIGHTED);
+         if (StrStartsWith("BID",      str))   return(PRICE_BID     );
+         if (StringLen(str) > 1) {
+            if (StrStartsWith("ASK",     str)) return(PRICE_ASK     );
+            if (StrStartsWith("AVERAGE", str)) return(PRICE_AVERAGE );
+         }
+      }
+      else {
+         if (str == "O"       ) return(PRICE_OPEN    );
+         if (str == "H"       ) return(PRICE_HIGH    );
+         if (str == "L"       ) return(PRICE_LOW     );
+         if (str == "C"       ) return(PRICE_CLOSE   );
+         if (str == "M"       ) return(PRICE_MEDIAN  );
+         if (str == "T"       ) return(PRICE_TYPICAL );
+         if (str == "W"       ) return(PRICE_WEIGHTED);
+         if (str == "A"       ) return(PRICE_AVERAGE );
+         if (str == "OPEN"    ) return(PRICE_OPEN    );
+         if (str == "HIGH"    ) return(PRICE_HIGH    );
+         if (str == "LOW"     ) return(PRICE_LOW     );
+         if (str == "CLOSE"   ) return(PRICE_CLOSE   );
+         if (str == "MEDIAN"  ) return(PRICE_MEDIAN  );
+         if (str == "TYPICAL" ) return(PRICE_TYPICAL );
+         if (str == "WEIGHTED") return(PRICE_WEIGHTED);
+         if (str == "AVERAGE" ) return(PRICE_AVERAGE );
+         if (str == "BID"     ) return(PRICE_BID     );        // no single letter id
+         if (str == "ASK"     ) return(PRICE_ASK     );        // no single letter id
+      }
    }
 
-   if (!execFlags & F_ERR_INVALID_PARAMETER)
-      return(_EMPTY(catch("StrToPriceType(1)  invalid parameter value = "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER)));
-   return(_EMPTY(SetLastError(ERR_INVALID_PARAMETER)));
+   if (flags & F_ERR_INVALID_PARAMETER && 1) SetLastError(ERR_INVALID_PARAMETER);
+   else                                      catch("StrToPriceType(1)  invalid parameter value: "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER);
+   return(-1);
 }
 
 
 /**
- * Gibt die lesbare Beschreibung einer MovingAverage-Methode zurück.
+ * Return a readable version of a Moving-Average method type constant.
  *
- * @param  int type - MA-Methode
+ * @param  int type - MA method type
  *
  * @return string
  */
-string MaMethodDescription(int method) {
-   switch (method) {
-      case MODE_SMA : return("SMA" );
-      case MODE_LWMA: return("LWMA");
-      case MODE_EMA : return("EMA" );
-      case MODE_ALMA: return("ALMA");
-   }
-   return(_EMPTY_STR(catch("MaMethodDescription()  invalid paramter method = "+ method, ERR_INVALID_PARAMETER)));
-}
-
-
-/**
- * Alias
- */
-string MovingAverageMethodDescription(int method) {
-   return(MaMethodDescription(method));
-}
-
-
-/**
- * Return a readable version of a MovingAverage method.
- *
- * @param  int method
- *
- * @return string
- */
-string MaMethodToStr(int method) {
-   switch (method) {
+string MaMethodToStr(int type) {
+   switch (type) {
       case MODE_SMA : return("MODE_SMA" );
       case MODE_LWMA: return("MODE_LWMA");
       case MODE_EMA : return("MODE_EMA" );
+      case MODE_SMMA: return("MODE_SMMA");
       case MODE_ALMA: return("MODE_ALMA");
    }
-   return(_EMPTY_STR(catch("MaMethodToStr()  invalid paramter method = "+ method, ERR_INVALID_PARAMETER)));
+   return(_EMPTY_STR(catch("MaMethodToStr(1)  invalid parameter type: "+ type, ERR_INVALID_PARAMETER)));
 }
 
 
 /**
- * Alias
+ * Return a description of a Moving-Average method type constant.
+ *
+ * @param  int  type              - MA method type
+ * @param  bool strict [optional] - whether to trigger an error if the passed value is invalid (default: yes)
+ *
+ * @return string - description or an empty string in case of errors
  */
-string MovingAverageMethodToStr(int method) {
-   return(MaMethodToStr(method));
+string MaMethodDescription(int type, bool strict = true) {
+   strict = strict!=0;
+
+   switch (type) {
+      case MODE_SMA : return("SMA" );
+      case MODE_LWMA: return("LWMA");
+      case MODE_EMA : return("EMA" );
+      case MODE_SMMA: return("SMMA");
+      case MODE_ALMA: return("ALMA");
+   }
+   if (strict)
+      return(_EMPTY_STR(catch("MaMethodDescription(1)  invalid parameter type: "+ type, ERR_INVALID_PARAMETER)));
+   return("");
 }
 
 
 /**
- * Return a readable version of a price type identifier.
+ * Return a readable version of a price type constant.
  *
  * @param  int type - price type
  *
@@ -5417,17 +5352,18 @@ string PriceTypeToStr(int type) {
       case PRICE_MEDIAN  : return("PRICE_MEDIAN"  );     // (High+Low)/2
       case PRICE_TYPICAL : return("PRICE_TYPICAL" );     // (High+Low+Close)/3
       case PRICE_WEIGHTED: return("PRICE_WEIGHTED");     // (High+Low+Close+Close)/4
+      case PRICE_AVERAGE:  return("PRICE_AVERAGE" );     // (O+H+L+C)/4
       case PRICE_BID     : return("PRICE_BID"     );
       case PRICE_ASK     : return("PRICE_ASK"     );
    }
-   return(_EMPTY_STR(catch("PriceTypeToStr(1)  invalid parameter type = "+ type, ERR_INVALID_PARAMETER)));
+   return(_EMPTY_STR(catch("PriceTypeToStr(1)  invalid parameter type: "+ type, ERR_INVALID_PARAMETER)));
 }
 
 
 /**
- * Gibt die lesbare Version eines Price-Identifiers zurück.
+ * Return a description of a price type constant.
  *
- * @param  int type - Price-Type
+ * @param  int type - price type
  *
  * @return string
  */
@@ -5440,59 +5376,73 @@ string PriceTypeDescription(int type) {
       case PRICE_MEDIAN  : return("Median"  );     // (High+Low)/2
       case PRICE_TYPICAL : return("Typical" );     // (High+Low+Close)/3
       case PRICE_WEIGHTED: return("Weighted");     // (High+Low+Close+Close)/4
+      case PRICE_AVERAGE:  return("Average" );     // (O+H+L+C)/4
       case PRICE_BID     : return("Bid"     );
       case PRICE_ASK     : return("Ask"     );
    }
-   return(_EMPTY_STR(catch("PriceTypeDescription(1)  invalid parameter type = "+ type, ERR_INVALID_PARAMETER)));
+   return(_EMPTY_STR(catch("PriceTypeDescription(1)  invalid parameter type: "+ type, ERR_INVALID_PARAMETER)));
 }
 
 
 /**
- * Return the integer constant of a timeframe identifier.
+ * Return the integer constant of a timeframe identifier. Supports custom timeframes.
  *
- * @param  string value     - M1, M5, M15, M30 etc.
- * @param  int    execFlags - execution control: errors to set silently (default: none)
+ * @param  string value            - M1, M5, M15, M30 etc.
+ * @param  int    flags [optional] - execution control flags (default: none)
+ *                                   F_CUSTOM_TIMEFRAME:      enable support of custom timeframes
+ *                                   F_ERR_INVALID_PARAMETER: silently handle ERR_INVALID_PARAMETER
  *
  * @return int - timeframe constant or -1 (EMPTY) if the value is not recognized
  */
-int StrToPeriod(string value, int execFlags=NULL) {
+int StrToPeriod(string value, int flags = NULL) {
    string str = StrToUpper(StrTrim(value));
 
    if (StrStartsWith(str, "PERIOD_"))
       str = StrSubstr(str, 7);
 
-   if (str ==           "M1" ) return(PERIOD_M1 );    // 1 minute
-   if (str == ""+ PERIOD_M1  ) return(PERIOD_M1 );    //
-   if (str ==           "M5" ) return(PERIOD_M5 );    // 5 minutes
-   if (str == ""+ PERIOD_M5  ) return(PERIOD_M5 );    //
-   if (str ==           "M15") return(PERIOD_M15);    // 15 minutes
-   if (str == ""+ PERIOD_M15 ) return(PERIOD_M15);    //
-   if (str ==           "M30") return(PERIOD_M30);    // 30 minutes
-   if (str == ""+ PERIOD_M30 ) return(PERIOD_M30);    //
-   if (str ==           "H1" ) return(PERIOD_H1 );    // 1 hour
-   if (str == ""+ PERIOD_H1  ) return(PERIOD_H1 );    //
-   if (str ==           "H4" ) return(PERIOD_H4 );    // 4 hour
-   if (str == ""+ PERIOD_H4  ) return(PERIOD_H4 );    //
-   if (str ==           "D1" ) return(PERIOD_D1 );    // 1 day
-   if (str == ""+ PERIOD_D1  ) return(PERIOD_D1 );    //
-   if (str ==           "W1" ) return(PERIOD_W1 );    // 1 week
-   if (str == ""+ PERIOD_W1  ) return(PERIOD_W1 );    //
-   if (str ==           "MN1") return(PERIOD_MN1);    // 1 month
-   if (str == ""+ PERIOD_MN1 ) return(PERIOD_MN1);    //
-   if (str ==           "Q1" ) return(PERIOD_Q1 );    // 1 quarter
-   if (str == ""+ PERIOD_Q1  ) return(PERIOD_Q1 );    //
+   if (str ==           "M1" ) return(PERIOD_M1 );
+   if (str == ""+ PERIOD_M1  ) return(PERIOD_M1 );
+   if (str ==           "M5" ) return(PERIOD_M5 );
+   if (str == ""+ PERIOD_M5  ) return(PERIOD_M5 );
+   if (str ==           "M15") return(PERIOD_M15);
+   if (str == ""+ PERIOD_M15 ) return(PERIOD_M15);
+   if (str ==           "M30") return(PERIOD_M30);
+   if (str == ""+ PERIOD_M30 ) return(PERIOD_M30);
+   if (str ==           "H1" ) return(PERIOD_H1 );
+   if (str == ""+ PERIOD_H1  ) return(PERIOD_H1 );
+   if (str ==           "H4" ) return(PERIOD_H4 );
+   if (str == ""+ PERIOD_H4  ) return(PERIOD_H4 );
+   if (str ==           "D1" ) return(PERIOD_D1 );
+   if (str == ""+ PERIOD_D1  ) return(PERIOD_D1 );
+   if (str ==           "W1" ) return(PERIOD_W1 );
+   if (str == ""+ PERIOD_W1  ) return(PERIOD_W1 );
+   if (str ==           "MN1") return(PERIOD_MN1);
+   if (str == ""+ PERIOD_MN1 ) return(PERIOD_MN1);
 
-   if (!execFlags & F_ERR_INVALID_PARAMETER)
-      return(_EMPTY(catch("StrToPeriod(1)  invalid parameter value = "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER)));
-   return(_EMPTY(SetLastError(ERR_INVALID_PARAMETER)));
+   if (flags & F_CUSTOM_TIMEFRAME && 1) {
+      if (str ==           "H2" ) return(PERIOD_H2 );
+      if (str == ""+ PERIOD_H2  ) return(PERIOD_H2 );
+      if (str ==           "H3" ) return(PERIOD_H3 );
+      if (str == ""+ PERIOD_H3  ) return(PERIOD_H3 );
+      if (str ==           "H6" ) return(PERIOD_H6 );
+      if (str == ""+ PERIOD_H6  ) return(PERIOD_H6 );
+      if (str ==           "H8" ) return(PERIOD_H8 );
+      if (str == ""+ PERIOD_H8  ) return(PERIOD_H8 );
+      if (str ==           "Q1" ) return(PERIOD_Q1 );
+      if (str == ""+ PERIOD_Q1  ) return(PERIOD_Q1 );
+   }
+
+   if (flags & F_ERR_INVALID_PARAMETER && 1)
+      return(_EMPTY(SetLastError(ERR_INVALID_PARAMETER)));
+   return(_EMPTY(catch("StrToPeriod(1)  invalid parameter value: "+ DoubleQuoteStr(value), ERR_INVALID_PARAMETER)));
 }
 
 
 /**
- * Alias
+ * Alias of StrToPeriod()
  */
-int StrToTimeframe(string timeframe, int execFlags=NULL) {
-   return(StrToPeriod(timeframe, execFlags));
+int StrToTimeframe(string timeframe, int flags = NULL) {
+   return(StrToPeriod(timeframe, flags));
 }
 
 
@@ -5532,7 +5482,7 @@ string SwapCalculationModeToStr(int mode) {
       case SCM_INTEREST       : return("SCM_INTEREST"       );
       case SCM_MARGIN_CURRENCY: return("SCM_MARGIN_CURRENCY");       // Stringo: non-standard calculation (vom Broker abhängig)
    }
-   return(_EMPTY_STR(catch("SwapCalculationModeToStr()  invalid paramter mode = "+ mode, ERR_INVALID_PARAMETER)));
+   return(_EMPTY_STR(catch("SwapCalculationModeToStr()  invalid parameter mode = "+ mode, ERR_INVALID_PARAMETER)));
 }
 
 
@@ -5595,7 +5545,7 @@ bool LogTicket(int ticket) {
    string   priceFormat = "."+ pipDigits + ifString(digits==pipDigits, "", "'");
    string   message     = StringConcatenate("#", ticket, " ", OrderTypeDescription(type), " ", NumberToStr(lots, ".1+"), " ", symbol, " at ", NumberToStr(openPrice, priceFormat), " (", TimeToStr(openTime, TIME_FULL), "), sl=", ifString(stopLoss, NumberToStr(stopLoss, priceFormat), "0"), ", tp=", ifString(takeProfit, NumberToStr(takeProfit, priceFormat), "0"), ",", ifString(closeTime, " closed at "+ NumberToStr(closePrice, priceFormat) +" ("+ TimeToStr(closeTime, TIME_FULL) +"),", ""), " commission=", DoubleToStr(commission, 2), ", swap=", DoubleToStr(swap, 2), ", profit=", DoubleToStr(profit, 2), ", magicNumber=", magic, ", comment=", DoubleQuoteStr(comment));
 
-   log("LogTicket()  "+ message);
+   logInfo("LogTicket()  "+ message);
 
    return(OrderPop("LogTicket(2)"));
 }
@@ -5731,18 +5681,18 @@ bool SendEmail(string sender, string receiver, string subject, string message) {
    int result = WinExec(cmdLine, SW_HIDE);   // SW_SHOW | SW_HIDE
    if (result < 32) return(!catch("SendEmail(13)->kernel32::WinExec(cmdLine=\""+ cmdLine +"\")  "+ ShellExecuteErrorDescription(result), ERR_WIN32_ERROR+result));
 
-   if (__LOG()) log("SendEmail(14)  Mail to "+ receiver +" transmitted: \""+ subject +"\"");
+   if (IsLogInfo()) logInfo("SendEmail(14)  Mail to "+ receiver +" transmitted: \""+ subject +"\"");
    return(!catch("SendEmail(15)"));
 }
 
 
 /**
- * Schickt eine SMS an die angegebene Telefonnummer.
+ * Send a text message to the specified phone number.
  *
- * @param  string receiver - Telefonnummer des Empfängers (internationales Format: +49-123-456789)
- * @param  string message  - Text der SMS
+ * @param  string receiver - phone number (international format: +49-123-456789)
+ * @param  string message  - text
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool SendSMS(string receiver, string message) {
    string _receiver = StrReplaceR(StrReplace(StrTrim(receiver), "-", ""), " ", "");
@@ -5751,25 +5701,22 @@ bool SendSMS(string receiver, string message) {
    else if (StrStartsWith(_receiver, "00")) _receiver = StrSubstr(_receiver, 2);
    if (!StrIsDigit(_receiver)) return(!catch("SendSMS(1)  invalid parameter receiver = "+ DoubleQuoteStr(receiver), ERR_INVALID_PARAMETER));
 
-   // (1) Zugangsdaten für SMS-Gateway holen
-   // Service-Provider
+   // get SMS gateway details
+   // service
    string section  = "SMS";
    string key      = "Provider";
    string provider = GetGlobalConfigString(section, key);
    if (!StringLen(provider)) return(!catch("SendSMS(2)  missing global configuration ["+ section +"]->"+ key, ERR_INVALID_CONFIG_VALUE));
-
-   // Username
+   // user
    section = "SMS."+ provider;
    key     = "username";
    string username = GetGlobalConfigString(section, key);
    if (!StringLen(username)) return(!catch("SendSMS(3)  missing global configuration ["+ section +"]->"+ key, ERR_INVALID_CONFIG_VALUE));
-
-   // Password
+   // pass
    key = "password";
    string password = GetGlobalConfigString(section, key);
    if (!StringLen(password)) return(!catch("SendSMS(4)  missing global configuration ["+ section +"]->"+ key, ERR_INVALID_CONFIG_VALUE));
-
-   // API-ID
+   // API id
    key = "api_id";
    int api_id = GetGlobalConfigInt(section, key);
    if (api_id <= 0) {
@@ -5778,7 +5725,7 @@ bool SendSMS(string receiver, string message) {
                              return(!catch("SendSMS(6)  invalid global configuration ["+ section +"]->"+ key +" = \""+ value +"\"", ERR_INVALID_CONFIG_VALUE));
    }
 
-   // (2) Befehlszeile für Shellaufruf zusammensetzen
+   // compose shell command line
    string url          = "https://api.clickatell.com/http/sendmsg?user="+ username +"&password="+ password +"&api_id="+ api_id +"&to="+ _receiver +"&text="+ UrlEncode(message);
    string filesDir     = GetMqlFilesPath();
    string responseFile = filesDir +"\\sms_"+ GmtTimeFormat(GetLocalTime(), "%Y-%m-%d %H.%M.%S") +"_"+ GetCurrentThreadId() +".response";
@@ -5787,23 +5734,21 @@ bool SendSMS(string receiver, string message) {
    string arguments    = "-b --no-check-certificate \""+ url +"\" -O \""+ responseFile +"\" -a \""+ logFile +"\"";
    string cmdLine      = cmd +" "+ arguments;
 
-   // (3) Shellaufruf
+   // execute shell command
    int result = WinExec(cmdLine, SW_HIDE);
    if (result < 32) return(!catch("SendSMS(7)->kernel32::WinExec(cmdLine="+ DoubleQuoteStr(cmdLine) +")  "+ ShellExecuteErrorDescription(result), ERR_WIN32_ERROR+result));
 
-   /**
-    * TODO: Fehlerauswertung nach dem Versand:
-    *
-    * --2011-03-23 08:32:06--  https://api.clickatell.com/http/sendmsg?user={user}&password={password}&api_id={api_id}&to={receiver}&text={text}
-    * Resolving api.clickatell.com... failed: Unknown host.
-    * wget: unable to resolve host address `api.clickatell.com'
-    *
-    *
-    * --2014-06-15 22:44:21--  (try:20)  https://api.clickatell.com/http/sendmsg?user={user}&password={password}&api_id={api_id}&to={receiver}&text={text}
-    * Connecting to api.clickatell.com|196.216.236.7|:443... failed: Permission denied.
-    * Giving up.
-    */
-   log("SendSMS(8)  SMS sent to "+ receiver +": \""+ message +"\"");
+   // TODO: analyse the response
+   // --------------------------
+   // --2011-03-23 08:32:06--  https://api.clickatell.com/http/sendmsg?user={user}&password={pass}&api_id={id}&to={receiver}&text={text}
+   // Resolving api.clickatell.com... failed: Unknown host.
+   // wget: unable to resolve host address `api.clickatell.com'
+   //
+   // --2014-06-15 22:44:21--  (try:20)  https://api.clickatell.com/http/sendmsg?user={user}&password={pass}&api_id={id}&to={receiver}&text={text}
+   // Connecting to api.clickatell.com|196.216.236.7|:443... failed: Permission denied.
+   // Giving up.
+
+   logInfo("SendSMS(8)  SMS sent to "+ receiver +": \""+ message +"\"");
    return(!catch("SendSMS(9)"));
 }
 
@@ -5824,132 +5769,24 @@ bool IsSuperContext() {
  * @param  double lots              - lot size
  * @param  string symbol [optional] - symbol (default: the current symbol)
  *
- * @return double - rounded lot size
+ * @return double - rounded lot size or NULL in case of errors
  */
 double NormalizeLots(double lots, string symbol = "") {
    if (!StringLen(symbol))
       symbol = Symbol();
+
    double lotstep = MarketInfo(symbol, MODE_LOTSTEP);
+
+   if (!lotstep) {
+      int error = GetLastError();
+      return(!catch("NormalizeLots(1)  MarketInfo("+ symbol +", MODE_LOTSTEP) not available: 0", ifInt(error, error, ERR_INVALID_MARKET_DATA)));
+   }
    return(NormalizeDouble(MathRound(lots/lotstep) * lotstep, 2));
 }
 
 
 /**
- * Initialize the status of logging warnings to email (available for experts only).
- *
- * @return bool - whether warning logging to email is enabled
- */
-bool init.LogWarningsToMail() {
-   __LOG_WARN.mail          = false;
-   __LOG_WARN.mail.sender   = "";
-   __LOG_WARN.mail.receiver = "";
-
-   if (IsExpert()) /*&&*/ if (GetConfigBool("Logging", "WarnToMail")) {    // available for experts only
-      // enabled
-      string mailSection = "Mail";
-      string senderKey   = "Sender";
-      string receiverKey = "Receiver";
-
-      string defaultSender = "mt4@"+ GetHostName() +".localdomain";
-      string sender        = GetConfigString(mailSection, senderKey, defaultSender);
-      if (!StrIsEmailAddress(sender))   return(!catch("init.LogWarningsToMail(1)  invalid email address: "+ ifString(IsConfigKey(mailSection, senderKey), "["+ mailSection +"]->"+ senderKey +" = "+ sender, "defaultSender = "+ defaultSender), ERR_INVALID_CONFIG_VALUE));
-
-      string receiver = GetConfigString(mailSection, receiverKey);
-      if (!StrIsEmailAddress(receiver)) return(!catch("init.LogWarningsToMail(2)  invalid email address: ["+ mailSection +"]->"+ receiverKey +" = "+ receiver, ERR_INVALID_CONFIG_VALUE));
-
-      __LOG_WARN.mail          = true;
-      __LOG_WARN.mail.sender   = sender;
-      __LOG_WARN.mail.receiver = receiver;
-      return(true);
-   }
-   return(false);
-}
-
-
-/**
- * Initialize the status of logging warnings to text message (available for experts only).
- *
- * @return bool - whether warning logging to text message is enabled
- */
-bool init.LogWarningsToSMS() {
-   __LOG_WARN.sms          = false;
-   __LOG_WARN.sms.receiver = "";
-
-   if (IsExpert()) /*&&*/ if (GetConfigBool("Logging", "WarnToSMS")) {     // available for experts only
-      // enabled
-      string smsSection  = "SMS";
-      string receiverKey = "Receiver";
-
-      string receiver = GetConfigString(smsSection, receiverKey);
-      if (!StrIsPhoneNumber(receiver)) return(!catch("init.LogWarningsToSMS(1)  invalid phone number: ["+ smsSection +"]->"+ receiverKey +" = "+ receiver, ERR_INVALID_CONFIG_VALUE));
-
-      __LOG_WARN.sms          = true;
-      __LOG_WARN.sms.receiver = receiver;
-      return(true);
-   }
-   return(false);
-}
-
-
-/**
- * Initialize the status of logging errors to email (available for experts only).
- *
- * @return bool - whether error logging to email is enabled
- */
-bool init.LogErrorsToMail() {
-   __LOG_ERROR.mail          = false;
-   __LOG_ERROR.mail.sender   = "";
-   __LOG_ERROR.mail.receiver = "";
-
-   if (IsExpert()) /*&&*/ if (GetConfigBool("Logging", "ErrorToMail")) {   // available for experts only
-      // enabled
-      string mailSection = "Mail";
-      string senderKey   = "Sender";
-      string receiverKey = "Receiver";
-
-      string defaultSender = "mt4@"+ GetHostName() +".localdomain";
-      string sender        = GetConfigString(mailSection, senderKey, defaultSender);
-      if (!StrIsEmailAddress(sender))   return(!catch("init.LogErrorsToMail(1)  invalid email address: "+ ifString(IsConfigKey(mailSection, senderKey), "["+ mailSection +"]->"+ senderKey +" = "+ sender, "defaultSender = "+ defaultSender), ERR_INVALID_CONFIG_VALUE));
-
-      string receiver = GetConfigString(mailSection, receiverKey);
-      if (!StrIsEmailAddress(receiver)) return(!catch("init.LogErrorsToMail(2)  invalid email address: ["+ mailSection +"]->"+ receiverKey +" = "+ receiver, ERR_INVALID_CONFIG_VALUE));
-
-      __LOG_ERROR.mail          = true;
-      __LOG_ERROR.mail.sender   = sender;
-      __LOG_ERROR.mail.receiver = receiver;
-      return(true);
-   }
-   return(false);
-}
-
-
-/**
- * Initialize the status of logging errors to text message (available for experts only).
- *
- * @return bool - whether error logging to text message is enabled
- */
-bool init.LogErrorsToSMS() {
-   __LOG_ERROR.sms          = false;
-   __LOG_ERROR.sms.receiver = "";
-
-   if (IsExpert()) /*&&*/ if (GetConfigBool("Logging", "ErrorToSMS")) {    // available for experts only
-      // enabled
-      string smsSection  = "SMS";
-      string receiverKey = "Receiver";
-
-      string receiver = GetConfigString(smsSection, receiverKey);
-      if (!StrIsPhoneNumber(receiver)) return(!catch("init.LogErrorsToSMS(1)  invalid phone number: ["+ smsSection +"]->"+ receiverKey +" = "+ receiver, ERR_INVALID_CONFIG_VALUE));
-
-      __LOG_ERROR.sms          = true;
-      __LOG_ERROR.sms.receiver = receiver;
-      return(true);
-   }
-   return(false);
-}
-
-
-/**
- * Load the "ALMA" indicator and return an indicator value.
+ * Load the "ALMA" indicator and return a value.
  *
  * @param  int    timeframe          - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    maPeriods          - indicator parameter
@@ -5961,7 +5798,7 @@ bool init.LogErrorsToSMS() {
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iALMA(int timeframe, int maPeriods, string maAppliedPrice, double distributionOffset, double distributionSigma, int iBuffer, int iBar) {
+double icALMA(int timeframe, int maPeriods, string maAppliedPrice, double distributionOffset, double distributionSigma, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -5975,22 +5812,22 @@ double iALMA(int timeframe, int maPeriods, string maAppliedPrice, double distrib
                           Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iALMA(1)", error));
-      warn("iALMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icALMA(1)", error));
+      logWarn("icALMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6001,7 +5838,7 @@ double iALMA(int timeframe, int maPeriods, string maAppliedPrice, double distrib
 
 
 /**
- * Load the "FATL" indicator and return an indicator value.
+ * Load the "FATL" indicator and return a value.
  *
  * @param  int timeframe - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int iBuffer   - indicator buffer index of the value to return
@@ -6009,7 +5846,7 @@ double iALMA(int timeframe, int maPeriods, string maAppliedPrice, double distrib
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iFATL(int timeframe, int iBuffer, int iBar) {
+double icFATL(int timeframe, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6018,22 +5855,22 @@ double iFATL(int timeframe, int iBuffer, int iBar) {
                           Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iFATL(1)", error));
-      warn("iFATL(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icFATL(1)", error));
+      logWarn("icFATL(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6044,7 +5881,7 @@ double iFATL(int timeframe, int iBuffer, int iBar) {
 
 
 /**
- * Load the "HalfTrend" indicator and return an indicator value.
+ * Load the "HalfTrend" indicator and return a value.
  *
  * @param  int timeframe - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int periods   - indicator parameter
@@ -6053,34 +5890,34 @@ double iFATL(int timeframe, int iBuffer, int iBar) {
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iHalfTrend(int timeframe, int periods, int iBuffer, int iBar) {
+double icHalfTrend(int timeframe, int periods, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
    double value = iCustom(NULL, timeframe, "HalfTrend",
                           periods,                                         // int    Periods
 
-                          DodgerBlue,                                      // color  Color.UpTrend
+                          Blue,                                            // color  Color.UpTrend
                           Red,                                             // color  Color.DownTrend
                           CLR_NONE,                                        // color  Color.Channel
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iHalfTrend(1)", error));
-      warn("iHalfTrend(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icHalfTrend(1)", error));
+      logWarn("icHalfTrend(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6091,7 +5928,7 @@ double iHalfTrend(int timeframe, int periods, int iBuffer, int iBar) {
 
 
 /**
- * Load the "Jurik Moving Average" indicator and return an indicator value.
+ * Load the "Jurik Moving Average" and return an indicator value.
  *
  * @param  int    timeframe    - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    periods      - indicator parameter
@@ -6102,7 +5939,7 @@ double iHalfTrend(int timeframe, int periods, int iBuffer, int iBar) {
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iJMA(int timeframe, int periods, int phase, string appliedPrice, int iBuffer, int iBar) {
+double icJMA(int timeframe, int periods, int phase, string appliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6111,26 +5948,26 @@ double iJMA(int timeframe, int periods, int phase, string appliedPrice, int iBuf
                           phase,                                           // int    Phase
                           appliedPrice,                                    // string AppliedPrice
 
-                          DodgerBlue,                                      // color  Color.UpTrend
+                          Blue,                                            // color  Color.UpTrend
                           Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iJMA(1)", error));
-      warn("iJMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icJMA(1)", error));
+      logWarn("icJMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6141,7 +5978,7 @@ double iJMA(int timeframe, int periods, int phase, string appliedPrice, int iBuf
 
 
 /**
- * Load the framework'a "MACD" indicator and return an indicator value.
+ * Load the custom "MACD" indicator and return a value.
  *
  * @param  int    timeframe          - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    fastMaPeriods      - indicator parameter
@@ -6155,11 +5992,11 @@ double iJMA(int timeframe, int periods, int phase, string appliedPrice, int iBuf
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iMACDX(int timeframe, int fastMaPeriods, string fastMaMethod, string fastMaAppliedPrice, int slowMaPeriods, string slowMaMethod, string slowMaAppliedPrice, int iBuffer, int iBar) {
+double icMACD(int timeframe, int fastMaPeriods, string fastMaMethod, string fastMaAppliedPrice, int slowMaPeriods, string slowMaMethod, string slowMaAppliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
-   double value = iCustom(NULL, timeframe, "MACDX",
+   double value = iCustom(NULL, timeframe, "MACD ",
                           fastMaPeriods,                                   // int    Fast.MA.Periods
                           fastMaMethod,                                    // string Fast.MA.Method
                           fastMaAppliedPrice,                              // string Fast.MA.AppliedPrice
@@ -6168,27 +6005,27 @@ double iMACDX(int timeframe, int fastMaPeriods, string fastMaMethod, string fast
                           slowMaMethod,                                    // string Slow.MA.Method
                           slowMaAppliedPrice,                              // string Slow.MA.AppliedPrice
 
-                          DodgerBlue,                                      // color  MainLine.Color
+                          Blue,                                            // color  MainLine.Color
                           1,                                               // int    MainLine.Width
-                          LimeGreen,                                       // color  Histogram.Color.Upper
+                          Green,                                           // color  Histogram.Color.Upper
                           Red,                                             // color  Histogram.Color.Lower
                           2,                                               // int    Histogram.Style.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string _____________________
                           "off",                                           // string Signal.onZeroCross
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string _____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iMACDX(1)", error));
-      warn("iMACDX(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icMACD(1)", error));
+      logWarn("icMACD(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6199,7 +6036,7 @@ double iMACDX(int timeframe, int fastMaPeriods, string fastMaMethod, string fast
 
 
 /**
- * Load the "Moving Average" indicator and return an indicator value.
+ * Load the custom "Moving Average" and return an indicator value.
  *
  * @param  int    timeframe      - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    maPeriods      - indicator parameter
@@ -6210,7 +6047,7 @@ double iMACDX(int timeframe, int fastMaPeriods, string fastMaMethod, string fast
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iMovingAverage(int timeframe, int maPeriods, string maMethod, string maAppliedPrice, int iBuffer, int iBar) {
+double icMovingAverage(int timeframe, int maPeriods, string maMethod, string maAppliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6220,25 +6057,25 @@ double iMovingAverage(int timeframe, int maPeriods, string maMethod, string maAp
                           maAppliedPrice,                                  // string MA.AppliedPrice
 
                           Blue,                                            // color  Color.UpTrend
-                          Orange,                                          // color  Color.DownTrend
+                          Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iMovingAverage(1)", error));
-      warn("iMovingAverage(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icMovingAverage(1)", error));
+      logWarn("icMovingAverage(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6249,7 +6086,7 @@ double iMovingAverage(int timeframe, int maPeriods, string maMethod, string maAp
 
 
 /**
- * Load the "NonLagMA" indicator and return an indicator value.
+ * Load the "NonLagMA" indicator and return a value.
  *
  * @param  int    timeframe    - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    cycleLength  - indicator parameter
@@ -6259,7 +6096,7 @@ double iMovingAverage(int timeframe, int maPeriods, string maMethod, string maAp
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iNonLagMA(int timeframe, int cycleLength, string appliedPrice, int iBuffer, int iBar) {
+double icNonLagMA(int timeframe, int cycleLength, string appliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6267,26 +6104,26 @@ double iNonLagMA(int timeframe, int cycleLength, string appliedPrice, int iBuffe
                           cycleLength,                                     // int    Cycle.Length
                           appliedPrice,                                    // string AppliedPrice
 
-                          RoyalBlue,                                       // color  Color.UpTrend
+                          Blue,                                            // color  Color.UpTrend
                           Red,                                             // color  Color.DownTrend
                           "Dot",                                           // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iNonLagMA(1)", error));
-      warn("iNonLagMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icNonLagMA(1)", error));
+      logWarn("icNonLagMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6297,7 +6134,7 @@ double iNonLagMA(int timeframe, int cycleLength, string appliedPrice, int iBuffe
 
 
 /**
- * Load the "RSI" indicator and return an indicator value.
+ * Load the custom "RSI" indicator and return a value.
  *
  * @param  int    timeframe    - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    periods      - indicator parameter
@@ -6307,11 +6144,11 @@ double iNonLagMA(int timeframe, int cycleLength, string appliedPrice, int iBuffe
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iRSIX(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
+double icRSI(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
-   double value = iCustom(NULL, timeframe, "RSI ",
+   double value = iCustom(NULL, timeframe, ".attic/RSI",
                           periods,                                         // int    RSI.Periods
                           appliedPrice,                                    // string RSI.AppliedPrice
 
@@ -6320,17 +6157,17 @@ double iRSIX(int timeframe, int periods, string appliedPrice, int iBuffer, int i
                           Blue,                                            // color  Histogram.Color.Upper
                           Red,                                             // color  Histogram.Color.Lower
                           0,                                               // int    Histogram.Style.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string _____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iRSIX(1)", error));
-      warn("iRSIX(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icRSI(1)", error));
+      logWarn("icRSI(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6341,7 +6178,7 @@ double iRSIX(int timeframe, int periods, string appliedPrice, int iBuffer, int i
 
 
 /**
- * Load the "SATL" indicator and return an indicator value.
+ * Load the "SATL" indicator and return a value.
  *
  * @param  int timeframe - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int iBuffer   - indicator buffer index of the value to return
@@ -6349,7 +6186,7 @@ double iRSIX(int timeframe, int periods, string appliedPrice, int iBuffer, int i
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iSATL(int timeframe, int iBuffer, int iBar) {
+double icSATL(int timeframe, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6358,22 +6195,22 @@ double iSATL(int timeframe, int iBuffer, int iBar) {
                           Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iSATL(1)", error));
-      warn("iSATL(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icSATL(1)", error));
+      logWarn("icSATL(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6384,7 +6221,7 @@ double iSATL(int timeframe, int iBuffer, int iBar) {
 
 
 /**
- * Load "Ehlers 2-Pole-SuperSmoother" indicator and return an indicator value.
+ * Load "Ehlers 2-Pole-SuperSmoother" indicator and return a value.
  *
  * @param  int    timeframe    - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    periods      - indicator parameter
@@ -6394,7 +6231,7 @@ double iSATL(int timeframe, int iBuffer, int iBar) {
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iSuperSmoother(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
+double icSuperSmoother(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6403,25 +6240,25 @@ double iSuperSmoother(int timeframe, int periods, string appliedPrice, int iBuff
                           appliedPrice,                                    // string AppliedPrice
 
                           Blue,                                            // color  Color.UpTrend
-                          Orange,                                          // color  Color.DownTrend
+                          Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iSuperSmoother(1)", error));
-      warn("iSuperSmoother(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icSuperSmoother(1)", error));
+      logWarn("icSuperSmoother(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6432,7 +6269,7 @@ double iSuperSmoother(int timeframe, int periods, string appliedPrice, int iBuff
 
 
 /**
- * Load the "SuperTrend" indicator and return an indicator value.
+ * Load the "SuperTrend" indicator and return a value.
  *
  * @param  int timeframe  - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int atrPeriods - indicator parameter
@@ -6442,7 +6279,7 @@ double iSuperSmoother(int timeframe, int periods, string appliedPrice, int iBuff
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iSuperTrend(int timeframe, int atrPeriods, int smaPeriods, int iBuffer, int iBar) {
+double icSuperTrend(int timeframe, int atrPeriods, int smaPeriods, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6456,22 +6293,22 @@ double iSuperTrend(int timeframe, int atrPeriods, int smaPeriods, int iBuffer, i
                           CLR_NONE,                                        // color  Color.MovingAverage
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iSuperTrend(1)", error));
-      warn("iSuperTrend(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icSuperTrend(1)", error));
+      logWarn("icSuperTrend(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6482,7 +6319,7 @@ double iSuperTrend(int timeframe, int atrPeriods, int smaPeriods, int iBuffer, i
 
 
 /**
- * Load the "TriEMA" indicator and return an indicator value.
+ * Load the "TriEMA" indicator and return a value.
  *
  * @param  int    timeframe    - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    periods      - indicator parameter
@@ -6492,7 +6329,7 @@ double iSuperTrend(int timeframe, int atrPeriods, int smaPeriods, int iBuffer, i
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iTriEMA(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
+double icTriEMA(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6504,22 +6341,22 @@ double iTriEMA(int timeframe, int periods, string appliedPrice, int iBuffer, int
                           Red,                                             // color  Color.DownTrend
                           "Line",                                          // string Draw.Type
                           1,                                               // int    Draw.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string ____________________
                           "off",                                           // string Signal.onTrendChange
                           "off",                                           // string Signal.Sound
                           "off",                                           // string Signal.Mail.Receiver
                           "off",                                           // string Signal.SMS.Receiver
                           "",                                              // string ____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iTriEMA(1)", error));
-      warn("iTriEMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icTriEMA(1)", error));
+      logWarn("icTriEMA(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6530,7 +6367,7 @@ double iTriEMA(int timeframe, int periods, string appliedPrice, int iBuffer, int
 
 
 /**
- * Load the "Trix" indicator and return an indicator value.
+ * Load the "Trix" indicator and return a value.
  *
  * @param  int    timeframe    - timeframe to load the indicator (NULL: the current timeframe)
  * @param  int    periods      - indicator parameter
@@ -6540,7 +6377,7 @@ double iTriEMA(int timeframe, int periods, string appliedPrice, int iBuffer, int
  *
  * @return double - indicator value or NULL in case of errors
  */
-double iTrix(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
+double icTrix(int timeframe, int periods, string appliedPrice, int iBuffer, int iBar) {
    static int lpSuperContext = 0; if (!lpSuperContext)
       lpSuperContext = GetIntsAddress(__ExecutionContext);
 
@@ -6548,22 +6385,22 @@ double iTrix(int timeframe, int periods, string appliedPrice, int iBuffer, int i
                           periods,                                         // int    EMA.Periods
                           appliedPrice,                                    // string EMA.AppliedPrice
 
-                          DodgerBlue,                                      // color  MainLine.Color
+                          Blue,                                            // color  MainLine.Color
                           1,                                               // int    MainLine.Width
-                          LimeGreen,                                       // color  Histogram.Color.Upper
+                          Green,                                           // color  Histogram.Color.Upper
                           Red,                                             // color  Histogram.Color.Lower
                           2,                                               // int    Histogram.Style.Width
-                          -1,                                              // int    Max.Values
+                          -1,                                              // int    Max.Bars
                           "",                                              // string _____________________
-                          lpSuperContext,                                  // int    __SuperContext__
+                          lpSuperContext,                                  // int    __lpSuperContext
 
                           iBuffer, iBar);
 
    int error = GetLastError();
    if (error != NO_ERROR) {
       if (error != ERS_HISTORY_UPDATE)
-         return(!catch("iTrix(1)", error));
-      warn("iTrix(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
+         return(!catch("icTrix(1)", error));
+      logWarn("icTrix(2)  "+ PeriodDescription(ifInt(!timeframe, Period(), timeframe)) +" (tick="+ Tick +")", ERS_HISTORY_UPDATE);
    }
 
    error = __ExecutionContext[EC.mqlError];                                // TODO: synchronize execution contexts
@@ -6582,9 +6419,6 @@ void __DummyCalls() {
    double dNull;
    string sNull, sNulls[];
 
-   __CHART();
-   __LOG();
-   __NAME();
    _bool(NULL);
    _double(NULL);
    _EMPTY();
@@ -6599,11 +6433,7 @@ void __DummyCalls() {
    _string(NULL);
    _true();
    Abs(NULL);
-   AccountAlias(NULL, NULL);
-   AccountCompanyId(NULL);
-   AccountNumberFromAlias(NULL, NULL);
    ArrayUnshiftString(sNulls, NULL);
-   catch(NULL, NULL, NULL);
    Ceil(NULL);
    Chart.DeleteValue(NULL);
    Chart.Expert.Properties();
@@ -6625,9 +6455,9 @@ void __DummyCalls() {
    CompareDoubles(NULL, NULL);
    CopyMemory(NULL, NULL, NULL);
    CountDecimals(NULL);
+   CreateLegendLabel();
    CreateString(NULL);
    DateTime(NULL);
-   debug(NULL);
    DebugMarketInfo(NULL);
    DeinitReason();
    Div(NULL, NULL);
@@ -6640,8 +6470,12 @@ void __DummyCalls() {
    FileAccessModeToStr(NULL);
    Floor(NULL);
    ForceAlert(NULL);
+   FullModuleName();
    GE(NULL, NULL);
+   GetAccountAlias();
+   GetAccountCompany();
    GetAccountConfigPath(NULL, NULL);
+   GetAccountNumberFromAlias(NULL, NULL);
    GetCommission();
    GetConfigBool(NULL, NULL);
    GetConfigColor(NULL, NULL);
@@ -6651,7 +6485,7 @@ void __DummyCalls() {
    GetConfigStringRaw(NULL, NULL);
    GetCurrency(NULL);
    GetCurrencyId(NULL);
-   GetExternalAssets(NULL, NULL);
+   GetExternalAssets();
    GetFxtTime();
    GetIniBool(NULL, NULL, NULL);
    GetIniColor(NULL, NULL, NULL);
@@ -6659,30 +6493,31 @@ void __DummyCalls() {
    GetIniInt(NULL, NULL, NULL);
    GetMqlFilesPath();
    GetServerTime();
+   GmtTimeFormat(NULL, NULL);
    GT(NULL, NULL);
    HandleCommands();
    HistoryFlagsToStr(NULL);
-   iALMA(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-   iFATL(NULL, NULL, NULL);
+   icALMA(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+   icFATL(NULL, NULL, NULL);
+   icHalfTrend(NULL, NULL, NULL, NULL);
+   icJMA(NULL, NULL, NULL, NULL, NULL, NULL);
+   icMACD(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+   icMovingAverage(NULL, NULL, NULL, NULL, NULL, NULL);
+   icNonLagMA(NULL, NULL, NULL, NULL, NULL);
+   icRSI(NULL, NULL, NULL, NULL, NULL);
+   icSATL(NULL, NULL, NULL);
+   icSuperSmoother(NULL, NULL, NULL, NULL, NULL);
+   icSuperTrend(NULL, NULL, NULL, NULL, NULL);
+   icTriEMA(NULL, NULL, NULL, NULL, NULL);
+   icTrix(NULL, NULL, NULL, NULL, NULL);
    ifBool(NULL, NULL, NULL);
    ifDouble(NULL, NULL, NULL);
    ifInt(NULL, NULL, NULL);
    ifString(NULL, NULL, NULL);
-   iHalfTrend(NULL, NULL, NULL, NULL);
-   iJMA(NULL, NULL, NULL, NULL, NULL, NULL);
-   iMACDX(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-   iMovingAverage(NULL, NULL, NULL, NULL, NULL, NULL);
-   init.IsLogEnabled();
-   init.LogErrorsToMail();
-   init.LogErrorsToSMS();
-   init.LogWarningsToMail();
-   init.LogWarningsToSMS();
    InitReasonDescription(NULL);
-   iNonLagMA(NULL, NULL, NULL, NULL, NULL);
    IntegerToHexString(NULL);
-   iRSIX(NULL, NULL, NULL, NULL, NULL);
    IsAccountConfigKey(NULL, NULL);
-   iSATL(NULL, NULL, NULL);
+   IsChart();
    IsConfigKey(NULL, NULL);
    IsCurrency(NULL);
    IsDemoFix();
@@ -6697,23 +6532,20 @@ void __DummyCalls() {
    IsLeapYear(NULL);
    IsLibrary();
    IsLimitOrderType(NULL);
+   IsLog();
    IsLongOrderType(NULL);
    IsNaN(NULL);
    IsNaT(NULL);
    IsOrderType(NULL);
    IsPendingOrderType(NULL);
    IsScript();
-   IsShortAccountCompany(NULL);
    IsShortOrderType(NULL);
    IsStopOrderType(NULL);
    IsSuperContext();
    IsTicket(NULL);
-   iSuperSmoother(NULL, NULL, NULL, NULL, NULL);
-   iSuperTrend(NULL, NULL, NULL, NULL, NULL);
-   iTriEMA(NULL, NULL, NULL, NULL, NULL);
-   iTrix(NULL, NULL, NULL, NULL, NULL);
    LE(NULL, NULL);
-   log(NULL);
+   LocalTimeFormat(NULL, NULL);
+   LoglevelDescription(NULL);
    LogTicket(NULL);
    LT(NULL, NULL);
    MaMethodDescription(NULL);
@@ -6724,19 +6556,22 @@ void __DummyCalls() {
    Max(NULL, NULL);
    MessageBoxButtonToStr(NULL);
    Min(NULL, NULL);
+   ModuleName();
    ModuleTypesToStr(NULL);
-   MovingAverageMethodDescription(NULL);
-   MovingAverageMethodToStr(NULL);
    MQL.IsDirectory(NULL);
    MQL.IsFile(NULL);
+   Mul(NULL, NULL);
    NameToColor(NULL);
    NE(NULL, NULL);
    NormalizeLots(NULL);
    NumberToStr(NULL, NULL);
+   ObjectDeleteEx(NULL);
    OrderPop(NULL);
    OrderPush(NULL);
+   ParseDate(NULL);
+   ParseDateTime(NULL);
    PeriodFlag();
-   PeriodFlagsToStr(NULL);
+   PeriodFlagToStr(NULL);
    PipValue();
    PipValueEx(NULL);
    PlaySoundEx(NULL);
@@ -6745,8 +6580,8 @@ void __DummyCalls() {
    PriceTypeDescription(NULL);
    PriceTypeToStr(NULL);
    ProgramInitReason();
+   ProgramName();
    QuoteStr(NULL);
-   RefreshExternalAssets(NULL, NULL);
    ResetLastError();
    RGBStrToColor(NULL);
    Round(NULL);
@@ -6759,8 +6594,6 @@ void __DummyCalls() {
    SendSMS(NULL, NULL);
    SetLastError(NULL, NULL);
    ShellExecuteErrorDescription(NULL);
-   ShortAccountCompany();
-   ShortAccountCompanyFromId(NULL);
    Sign(NULL);
    start.RelaunchInputDialog();
    StrCapitalize(NULL);
@@ -6789,9 +6622,9 @@ void __DummyCalls() {
    StrSubstr(NULL, NULL);
    StrToBool(NULL);
    StrToHexStr(NULL);
+   StrToLogLevel(NULL);
    StrToLower(NULL);
    StrToMaMethod(NULL);
-   StrToMovingAverageMethod(NULL);
    StrToOperationType(NULL);
    StrToPeriod(NULL);
    StrToPriceType(NULL);
@@ -6807,21 +6640,22 @@ void __DummyCalls() {
    Tester.IsPaused();
    Tester.IsStopped();
    Tester.Pause();
+   Tester.Stop();
    This.IsTesting();
    TimeCurrentEx();
-   TimeDayFix(NULL);
-   TimeDayOfWeekFix(NULL);
+   TimeDayEx(NULL);
+   TimeDayOfWeekEx(NULL);
    TimeframeFlag();
+   TimeframeFlagToStr(NULL);
    TimeFXT();
    TimeGMT();
    TimeServer();
-   TimeYearFix(NULL);
+   TimeYearEx(NULL);
    Toolbar.Experts(NULL);
    TradeCommandToStr(NULL);
    UninitializeReasonDescription(NULL);
    UrlEncode(NULL);
    WaitForTicket(NULL);
-   warn(NULL);
    WriteIniString(NULL, NULL, NULL, NULL);
 }
 
@@ -6839,12 +6673,13 @@ void __DummyCalls() {
    int      ArrayPushString(string array[], string value);
    string   CharToHexStr(int char);
    string   CreateTempFile(string path, string prefix);
+   int      DeleteRegisteredObjects();
    string   DoubleToStrEx(double value, int digits);
    int      Explode(string input, string separator, string results[], int limit);
    int      GetAccountNumber();
    string   GetHostName();
    int      GetIniKeys(string fileName, string section, string keys[]);
-   string   GetServerName();
+   string   GetAccountServer();
    string   GetServerTimezone();
    string   GetWindowText(int hWnd);
    datetime GmtToFxtTime(datetime gmtTime);
@@ -6856,10 +6691,9 @@ void __DummyCalls() {
    string   StdSymbol();
 
 #import "rsfExpander.dll"
-   string   ec_ModuleName(int ec[]);
    string   ec_ProgramName(int ec[]);
    int      ec_SetMqlError(int ec[], int lastError);
-   string   EXECUTION_CONTEXT_toStr(int ec[], int outputDebug);
+   string   EXECUTION_CONTEXT_toStr(int ec[]);
    int      LeaveContext(int ec[]);
 
 #import "kernel32.dll"
@@ -6874,12 +6708,12 @@ void __DummyCalls() {
 #import "user32.dll"
    int      GetAncestor(int hWnd, int cmd);
    int      GetClassNameA(int hWnd, string lpBuffer, int bufferSize);
+   int      GetDesktopWindow();
    int      GetDlgCtrlID(int hWndCtl);
    int      GetDlgItem(int hDlg, int itemId);
    int      GetParent(int hWnd);
    int      GetTopWindow(int hWnd);
    int      GetWindow(int hWnd, int cmd);
-   int      GetWindowThreadProcessId(int hWnd, int lpProcessId[]);
    bool     IsWindow(int hWnd);
    int      MessageBoxA(int hWnd, string lpText, string lpCaption, int style);
    bool     PostMessageA(int hWnd, int msg, int wParam, int lParam);

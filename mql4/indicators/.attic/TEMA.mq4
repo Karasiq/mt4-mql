@@ -11,8 +11,8 @@
  *  • MovingAverage.MODE_MA: MA values
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -23,7 +23,7 @@ extern color  MA.Color        = OrangeRed;
 extern string Draw.Type       = "Line* | Dot";
 extern int    Draw.Width      = 2;
 
-extern int    Max.Values      = 5000;                    // max. amount of values to calculate (-1: all)
+extern int    Max.Bars        = 10000;                   // max. values to calculate (-1: all available)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -38,7 +38,7 @@ extern int    Max.Values      = 5000;                    // max. amount of value
 
 #property indicator_chart_window
 #property indicator_buffers   1                          // buffers visible in input dialog
-int       allocated_buffers = 3;                         // used buffers
+int       terminal_buffers =  3;                         // buffers managed by the terminal
 #property indicator_width1    2
 
 double tema     [];                                      // MA values:       visible, displayed in "Data" window
@@ -48,8 +48,7 @@ double secondEma[];                                      // second EMA(EMA): inv
 int    ma.appliedPrice;
 string ma.name;                                          // name for chart legend, "Data" window and context menues
 
-int    drawType      = DRAW_LINE;                        // DRAW_LINE | DRAW_ARROW
-int    drawArrowSize = 1;                                // default symbol size for Draw.Type="dot"
+int    drawType;
 string legendLabel;
 
 
@@ -65,7 +64,7 @@ int onInit() {
 
    // (1) validate inputs
    // MA.Periods
-   if (MA.Periods < 1)  return(catch("onInit(1)  Invalid input parameter MA.Periods = "+ MA.Periods, ERR_INVALID_INPUT_PARAMETER));
+   if (MA.Periods < 1) return(catch("onInit(1)  Invalid input parameter MA.Periods = "+ MA.Periods, ERR_INVALID_INPUT_PARAMETER));
 
    // MA.AppliedPrice
    string values[], sValue = StrToLower(MA.AppliedPrice);
@@ -75,16 +74,9 @@ int onInit() {
    }
    sValue = StrTrim(sValue);
    if (sValue == "") sValue = "close";                      // default price type
-   ma.appliedPrice = StrToPriceType(sValue, F_ERR_INVALID_PARAMETER);
-   if (IsEmpty(ma.appliedPrice)) {
-      if      (StrStartsWith("open",     sValue)) ma.appliedPrice = PRICE_OPEN;
-      else if (StrStartsWith("high",     sValue)) ma.appliedPrice = PRICE_HIGH;
-      else if (StrStartsWith("low",      sValue)) ma.appliedPrice = PRICE_LOW;
-      else if (StrStartsWith("close",    sValue)) ma.appliedPrice = PRICE_CLOSE;
-      else if (StrStartsWith("median",   sValue)) ma.appliedPrice = PRICE_MEDIAN;
-      else if (StrStartsWith("typical",  sValue)) ma.appliedPrice = PRICE_TYPICAL;
-      else if (StrStartsWith("weighted", sValue)) ma.appliedPrice = PRICE_WEIGHTED;
-      else              return(catch("onInit(2)  Invalid input parameter MA.AppliedPrice = "+ DoubleQuoteStr(MA.AppliedPrice), ERR_INVALID_INPUT_PARAMETER));
+   ma.appliedPrice = StrToPriceType(sValue, F_PARTIAL_ID|F_ERR_INVALID_PARAMETER);
+   if (IsEmpty(ma.appliedPrice) || ma.appliedPrice > PRICE_WEIGHTED) {
+                       return(catch("onInit(2)  Invalid input parameter MA.AppliedPrice = "+ DoubleQuoteStr(MA.AppliedPrice), ERR_INVALID_INPUT_PARAMETER));
    }
    MA.AppliedPrice = PriceTypeDescription(ma.appliedPrice);
 
@@ -100,14 +92,14 @@ int onInit() {
    sValue = StrTrim(sValue);
    if      (StrStartsWith("line", sValue)) { drawType = DRAW_LINE;  Draw.Type = "Line"; }
    else if (StrStartsWith("dot",  sValue)) { drawType = DRAW_ARROW; Draw.Type = "Dot";  }
-   else                 return(catch("onInit(3)  Invalid input parameter Draw.Type = "+ DoubleQuoteStr(Draw.Type), ERR_INVALID_INPUT_PARAMETER));
+   else                return(catch("onInit(3)  Invalid input parameter Draw.Type = "+ DoubleQuoteStr(Draw.Type), ERR_INVALID_INPUT_PARAMETER));
 
    // Draw.Width
-   if (Draw.Width < 0)  return(catch("onInit(4)  Invalid input parameter Draw.Width = "+ Draw.Width, ERR_INVALID_INPUT_PARAMETER));
-   if (Draw.Width > 5)  return(catch("onInit(5)  Invalid input parameter Draw.Width = "+ Draw.Width, ERR_INVALID_INPUT_PARAMETER));
+   if (Draw.Width < 0) return(catch("onInit(4)  Invalid input parameter Draw.Width = "+ Draw.Width, ERR_INVALID_INPUT_PARAMETER));
+   if (Draw.Width > 5) return(catch("onInit(5)  Invalid input parameter Draw.Width = "+ Draw.Width, ERR_INVALID_INPUT_PARAMETER));
 
-   // Max.Values
-   if (Max.Values < -1) return(catch("onInit(6)  Invalid input parameter Max.Values = "+ Max.Values, ERR_INVALID_INPUT_PARAMETER));
+   // Max.Bars
+   if (Max.Bars < -1)  return(catch("onInit(6)  Invalid input parameter Max.Bars = "+ Max.Bars, ERR_INVALID_INPUT_PARAMETER));
 
 
    // (2) setup buffer management
@@ -117,15 +109,15 @@ int onInit() {
 
 
    // (3) data display configuration, names and labels
+   if (!IsSuperContext()) {                                    // no chart legend if called by iCustom()
+       legendLabel = CreateLegendLabel();
+       RegisterObject(legendLabel);
+   }
    string shortName="TEMA("+ MA.Periods +")", strAppliedPrice="";
    if (ma.appliedPrice != PRICE_CLOSE) strAppliedPrice = ", "+ PriceTypeDescription(ma.appliedPrice);
    ma.name = "TEMA("+ MA.Periods + strAppliedPrice +")";
-   if (!IsSuperContext()) {                                    // no chart legend if called by iCustom()
-       legendLabel = CreateLegendLabel(ma.name);
-       ObjectRegister(legendLabel);
-   }
-   IndicatorShortName(shortName);                              // context menu
-   SetIndexLabel(MODE_TEMA,  shortName);                       // "Data" window and tooltips
+   IndicatorShortName(shortName);                              // chart tooltips and context menu
+   SetIndexLabel(MODE_TEMA,  shortName);                       // chart tooltips and "Data" window
    SetIndexLabel(MODE_EMA_1, NULL);
    SetIndexLabel(MODE_EMA_2, NULL);
    IndicatorDigits(SubPipDigits);
@@ -133,8 +125,8 @@ int onInit() {
 
    // (4) drawing options and styles
    int startDraw = 0;
-   if (Max.Values >= 0) startDraw = Bars - Max.Values;
-   if (startDraw  <  0) startDraw = 0;
+   if (Max.Bars >= 0) startDraw = Bars - Max.Bars;
+   if (startDraw < 0) startDraw = 0;
    SetIndexDrawBegin(MODE_TEMA, startDraw);
    SetIndicatorOptions();
 
@@ -148,7 +140,6 @@ int onInit() {
  * @return int - error status
  */
 int onDeinit() {
-   DeleteRegisteredObjects(NULL);
    RepositionLegend();
    return(catch("onDeinit(1)"));
 }
@@ -171,10 +162,10 @@ int onDeinitRecompile() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(tema)) return(log("onTick(1)  size(tema) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(tema)) return(logInfo("onTick(1)  size(tema) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
-   // reset all buffers and delete garbage behind Max.Values before doing a full recalculation
+   // reset all buffers and delete garbage behind Max.Bars before doing a full recalculation
    if (!UnchangedBars) {
       ArrayInitialize(tema,      EMPTY_VALUE);
       ArrayInitialize(firstEma,  EMPTY_VALUE);
@@ -192,10 +183,10 @@ int onTick() {
 
    // (1) calculate start bar
    int changedBars = ChangedBars;
-   if (Max.Values >= 0) /*&&*/ if (Max.Values < ChangedBars)
-      changedBars = Max.Values;                                      // Because EMA(EMA(EMA)) is used in the calculation, TEMA needs 3*<period>-2 samples
+   if (Max.Bars >= 0) /*&&*/ if (Max.Bars < ChangedBars)
+      changedBars = Max.Bars;                                        // Because EMA(EMA(EMA)) is used in the calculation, TEMA needs 3*<period>-2 samples
    int bar, startBar = Min(changedBars-1, Bars - (3*MA.Periods-2));  // to start producing values in contrast to <period> samples needed by a regular EMA.
-   if (startBar < 0) return(catch("onTick(2)", ERR_HISTORY_INSUFFICIENT));
+   if (startBar < 0) return(logInfo("onTick(2)  Tick="+ Tick, ERR_HISTORY_INSUFFICIENT));
 
 
    // (2) recalculate changed bars
@@ -217,15 +208,14 @@ int onTick() {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
-   IndicatorBuffers(allocated_buffers);
+   IndicatorBuffers(terminal_buffers);
 
-   int draw_type  = ifInt(Draw.Width, drawType, DRAW_NONE);
-   int draw_width = ifInt(drawType==DRAW_ARROW, drawArrowSize, Draw.Width);
+   int draw_type = ifInt(Draw.Width, drawType, DRAW_NONE);
 
-   SetIndexStyle(MODE_TEMA, draw_type, EMPTY, draw_width, MA.Color); SetIndexArrow(MODE_TEMA, 159);
+   SetIndexStyle(MODE_TEMA, draw_type, EMPTY, Draw.Width, MA.Color); SetIndexArrow(MODE_TEMA, 158);
 }
 
 
@@ -235,13 +225,13 @@ void SetIndicatorOptions() {
  * @return bool - success status
  */
 bool StoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.StoreInt   (name +".input.MA.Periods",      MA.Periods     );
    Chart.StoreString(name +".input.MA.AppliedPrice", MA.AppliedPrice);
    Chart.StoreColor (name +".input.MA.Color",        MA.Color       );
    Chart.StoreString(name +".input.Draw.Type",       Draw.Type      );
    Chart.StoreInt   (name +".input.Draw.Width",      Draw.Width     );
-   Chart.StoreInt   (name +".input.Max.Values",      Max.Values     );
+   Chart.StoreInt   (name +".input.Max.Bars",        Max.Bars       );
    return(!catch("StoreInputParameters(1)"));
 }
 
@@ -252,13 +242,13 @@ bool StoreInputParameters() {
  * @return bool - success status
  */
 bool RestoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.RestoreInt   (name +".input.MA.Periods",      MA.Periods     );
    Chart.RestoreString(name +".input.MA.AppliedPrice", MA.AppliedPrice);
    Chart.RestoreColor (name +".input.MA.Color",        MA.Color       );
    Chart.RestoreString(name +".input.Draw.Type",       Draw.Type      );
    Chart.RestoreInt   (name +".input.Draw.Width",      Draw.Width     );
-   Chart.RestoreInt   (name +".input.Max.Values",      Max.Values     );
+   Chart.RestoreInt   (name +".input.Max.Bars",        Max.Bars       );
    return(!catch("RestoreInputParameters(1)"));
 }
 
@@ -274,6 +264,6 @@ string InputsToStr() {
                             "MA.Color=",        ColorToStr(MA.Color),            ";", NL,
                             "Draw.Type=",       DoubleQuoteStr(Draw.Type),       ";", NL,
                             "Draw.Width=",      Draw.Width,                      ";", NL,
-                            "Max.Values=",      Max.Values,                      ";")
+                            "Max.Bars=",        Max.Bars,                        ";")
    );
 }

@@ -1,8 +1,8 @@
 /**
  * Global constants and variables
  */
-#property stacksize 32768                                   // According to differing MetaQuotes sources the default stacksize per MQL module in 2019 is
-                                                            // at least 256KB (some claim even 1-8MB). In build 225 the default stacksize was 16KB which
+#property stacksize 32768                                   // According to different MetaQuotes sources the default stacksize per MQL module in 2019 is
+                                                            // at least 256KB (some even claim 1-8MB). In build 225 the default stacksize was 16KB which
 #include <mqldefines.mqh>                                   // at some point had to be increased. Using 32KB never caused any issues.
 #include <win32defines.mqh>                                 //
 #include <structs/sizes.mqh>                                //  @see  https://docs.mql4.com/basis/variables/local#stack
@@ -12,86 +12,53 @@
 int      __ExecutionContext[EXECUTION_CONTEXT.intSize];     // aktueller ExecutionContext
 //int    __lpSuperContext;                                  // Zeiger auf einen SuperContext, kann nur in Indikatoren und deren Libraries gesetzt sein
 //int    __lpTestedExpertContext;                           // im Tester Zeiger auf den ExecutionContext des Experts (noch nicht implementiert)
-//int    __WHEREAMI__;                                      // die aktuell ausgeführte MQL-Rootfunktion des Hauptmoduls: CF_INIT | CF_START | CF_DEINIT
-
-int      __LOG_LEVEL;                                       // TODO: der konfigurierte Loglevel
-bool     __LOG_WARN.mail;                                   // whether warnings are logged to email
-string   __LOG_WARN.mail.sender;                            // warning mail sender
-string   __LOG_WARN.mail.receiver;                          // warning mail receiver
-bool     __LOG_WARN.sms;                                    // whether warnings are logged to text message
-string   __LOG_WARN.sms.receiver;                           // warning text message receiver
-bool     __LOG_ERROR.mail;                                  // whether errors are logged to email
-string   __LOG_ERROR.mail.sender;                           // error mail sender
-string   __LOG_ERROR.mail.receiver;                         // error mail receiver
-bool     __LOG_ERROR.sms;                                   // whether errors are logged to text message
-string   __LOG_ERROR.sms.receiver;                          // error text message receiver
-
-bool     __SMS.alerts;                                      // ob SMS-Benachrichtigungen aktiviert sind
-string   __SMS.receiver;                                    // Empfänger-Nr. für SMS-Benachrichtigungen
+//int    __CoreFunction;                                    // the core function currently executed by the main MQL module: CF_INIT|CF_START|CF_DEINIT
 
 bool     __STATUS_HISTORY_UPDATE;                           // History-Update wurde getriggert
-bool     __STATUS_HISTORY_INSUFFICIENT;                     // History ist oder war nicht ausreichend
 bool     __STATUS_RELAUNCH_INPUT;                           // Anforderung, Input-Dialog erneut zu öffnen
 bool     __STATUS_INVALID_INPUT;                            // ungültige Parametereingabe im Input-Dialog
 bool     __STATUS_OFF;                                      // Programm komplett abgebrochen (switched off)
 int      __STATUS_OFF.reason;                               // Ursache für Programmabbruch: Fehlercode (kann, muß aber nicht gesetzt sein)
 
 double   Pip, Pips;                                         // Betrag eines Pips des aktuellen Symbols (z.B. 0.0001 = Pip-Size)
-int      PipDigits, SubPipDigits;                           // Digits eines Pips/Subpips des aktuellen Symbols (Annahme: Pips sind gradzahlig)
+int      PipDigits, SubPipDigits;                           // Digits eines Pips/Subpips des aktuellen Symbols (Annahme: Pip sind gradzahlig)
 int      PipPoint, PipPoints;                               // Dezimale Auflösung eines Pips des aktuellen Symbols (Anzahl der möglichen Werte je Pip: 1 oder 10)
 double   TickSize;                                          // kleinste Änderung des Preises des aktuellen Symbols je Tick (Vielfaches von Point)
 string   PriceFormat, PipPriceFormat, SubPipPriceFormat;    // Preisformate des aktuellen Symbols für NumberToStr()
 int      Tick;                                              // number of times MQL::start() was called (value survives timeframe changes)
 datetime Tick.Time;                                         // server time of the last received tick
 bool     Tick.isVirtual;
-int      ChangedBars;                                       // Bars = UnchangedBars + ChangedBars
-int      UnchangedBars;                                     // used in indicators only as otherwise IndicatorCounted() is not supported
+int      ChangedBars;                                       // Bars = ChangedBars + UnchangedBars
+int      UnchangedBars;                                     // used in indicators only, otherwise IndicatorCounted() is not supported
 int      ShiftedBars;                                       // used in offline charts only
 
 int      last_error;                                        // last error of the current core function call
 int      prev_error;                                        // last error of the previous core function call
 
-int      stack.OrderSelect[];                               // FIFO stack of selected orders per module
-
-string   __Timezones[] = {
-   /*0                           =>*/ "server",             // default
-   /*TIMEZONE_ID_ALPARI          =>*/ TIMEZONE_ALPARI,
-   /*TIMEZONE_ID_AMERICA_NEW_YORK=>*/ TIMEZONE_AMERICA_NEW_YORK,
-   /*TIMEZONE_ID_EUROPE_BERLIN   =>*/ TIMEZONE_EUROPE_BERLIN,
-   /*TIMEZONE_ID_EUROPE_KIEV     =>*/ TIMEZONE_EUROPE_KIEV,
-   /*TIMEZONE_ID_EUROPE_LONDON   =>*/ TIMEZONE_EUROPE_LONDON,
-   /*TIMEZONE_ID_EUROPE_MINSK    =>*/ TIMEZONE_EUROPE_MINSK,
-   /*TIMEZONE_ID_FXT             =>*/ TIMEZONE_FXT,
-   /*TIMEZONE_ID_FXT_MINUS_0200  =>*/ TIMEZONE_FXT_MINUS_0200,
-   /*TIMEZONE_ID_GLOBALPRIME     =>*/ TIMEZONE_GLOBALPRIME
-   /*TIMEZONE_ID_GMT             =>*/ TIMEZONE_GMT
-};
+int      stack.OrderSelect[];                               // FIFO stack of selected orders (per MQL module)
 
 
 // special constants
 #define NULL                        0
-#define INT_MIN            0x80000000                       // -2147483648: kleinster negativer Integer-Value (signed)               (datetime)(uint)INT_MIN = '1901-12-13 20:45:52'
-#define INT_MAX            0x7FFFFFFF                       //  2147483647: größter positiver Integer-Value (signed)                 (datetime)(uint)INT_MAX = '2038-01-19 03:14:07'
-#define EMPTY_STR                  ""                       //                                                                                 min(datetime) = '1970-01-01 00:00:00'
-#define EMPTY_VALUE           INT_MAX                       // MetaQuotes: empty custom indicator value (Integer, kein Double)                 max(datetime) = '2037-12-31 23:59:59'
+#define EMPTY_STR                   ""
 #define WHOLE_ARRAY                 0                       // MetaQuotes
 #define MAX_STRING_LITERAL          "..............................................................................................................................................................................................................................................................."
 
 #define HTML_TAB                    "&Tab;"                 // tab                        \t
 #define HTML_BRVBAR                 "&brvbar;"              // broken vertical bar        |
-#define HTML_PIPE                   HTML_BRVBAR             // alias: pipe                |
+#define HTML_PIPE                   HTML_BRVBAR             // pipe (alias)               |
 #define HTML_LCUB                   "&lcub;"                // left curly brace           {
 #define HTML_RCUB                   "&rcub;"                // right curly brace          }
 #define HTML_APOS                   "&apos;"                // apostrophe                 '
 #define HTML_DQUOTE                 "&quot;"                // double quote               "
-#define HTML_SQUOTE                 HTML_APOS               // alias: single quote        '
+#define HTML_SQUOTE                 HTML_APOS               // single quote (alias)       '
 #define HTML_COMMA                  "&comma;"               // comma                      ,
 
 
 // Special variables: werden in init() definiert, da in MQL nicht constant deklarierbar
-double  NaN;                                                // -1.#IND: indefinite quiet Not-a-Number (auf x86 CPU's immer negativ)
+double  NaN;                                                // -1.#IND: indefinite quiet Not-a-Number (auf x86 CPUs immer negativ)
 double  P_INF;                                              //  1.#INF: positive infinity
-double  N_INF;                                              // -1.#INF: negative infinity (@see http://blogs.msdn.com/b/oldnewthing/archive/2013/02/21/10395734.aspx)
+double  N_INF;                                              // -1.#INF: negative infinity, @see  http://blogs.msdn.com/b/oldnewthing/archive/2013/02/21/10395734.aspx
 
 
 // Magic characters zur visuellen Darstellung von nicht darstellbaren Zeichen in binären Strings, siehe BufferToStr()
@@ -245,161 +212,159 @@ double  N_INF;                                              // -1.#INF: negative
 #define OBJPROP_FIRSTLEVEL31      241
 
 
-// Object visibility flags, siehe ObjectSet(label, OBJPROP_TIMEFRAMES, ...)
-#define OBJ_PERIOD_M1          0x0001           //   1: object is shown on 1-minute charts
-#define OBJ_PERIOD_M5          0x0002           //   2: object is shown on 5-minute charts
-#define OBJ_PERIOD_M15         0x0004           //   4: object is shown on 15-minute charts
-#define OBJ_PERIOD_M30         0x0008           //   8: object is shown on 30-minute charts
-#define OBJ_PERIOD_H1          0x0010           //  16: object is shown on 1-hour charts
-#define OBJ_PERIOD_H4          0x0020           //  32: object is shown on 4-hour charts
-#define OBJ_PERIOD_D1          0x0040           //  64: object is shown on daily charts
-#define OBJ_PERIOD_W1          0x0080           // 128: object is shown on weekly charts
-#define OBJ_PERIOD_MN1         0x0100           // 256: object is shown on monthly charts
-#define OBJ_PERIODS_ALL        0x01FF           // 511: object is shown on all timeframes: M1 | M5 | M15 | M30 | H1 | H4 | D1 | W1  | MN1 (NULL hat denselben Effekt)
+// chart object visibility flags, see ObjectSet(label, OBJPROP_TIMEFRAMES, ...)
+#define OBJ_PERIOD_M1          0x0001           //   1: object is shown on M1 charts
+#define OBJ_PERIOD_M5          0x0002           //   2: object is shown on M5 charts
+#define OBJ_PERIOD_M15         0x0004           //   4: object is shown on M15 charts
+#define OBJ_PERIOD_M30         0x0008           //   8: object is shown on M30 charts
+#define OBJ_PERIOD_H1          0x0010           //  16: object is shown on H1 charts
+#define OBJ_PERIOD_H4          0x0020           //  32: object is shown on H4 charts
+#define OBJ_PERIOD_D1          0x0040           //  64: object is shown on D1 charts
+#define OBJ_PERIOD_W1          0x0080           // 128: object is shown on W1 charts
+#define OBJ_PERIOD_MN1         0x0100           // 256: object is shown on MN1 charts
+#define OBJ_PERIODS_ALL        0x01FF           // 511: object is shown on all timeframes (same as specifying NULL)
 #define OBJ_PERIODS_NONE       EMPTY            //  -1: object is hidden on all timeframes
 
 
-// Timeframe-Flags, siehe EventListener.Baropen()
-#define F_PERIOD_M1            OBJ_PERIOD_M1    //    1
-#define F_PERIOD_M5            OBJ_PERIOD_M5    //    2
-#define F_PERIOD_M15           OBJ_PERIOD_M15   //    4
-#define F_PERIOD_M30           OBJ_PERIOD_M30   //    8
-#define F_PERIOD_H1            OBJ_PERIOD_H1    //   16
-#define F_PERIOD_H4            OBJ_PERIOD_H4    //   32
-#define F_PERIOD_D1            OBJ_PERIOD_D1    //   64
-#define F_PERIOD_W1            OBJ_PERIOD_W1    //  128
-#define F_PERIOD_MN1           OBJ_PERIOD_MN1   //  256
-#define F_PERIOD_Q1            0x0200           //  512
-#define F_PERIODS_ALL          0x03FF           // 1023: M1 | M5 | M15 | M30 | H1 | H4 | D1 | W1  | MN1 | Q1
-
-
 // OrderSelect-ID's zur Steuerung des Stacks der Orderkontexte, siehe OrderPush(), OrderPop()
-#define O_PUSH                         1
-#define O_POP                          2
+#define O_PUSH                            1
+#define O_POP                             2
 
 
-// Series array identifier, siehe ArrayCopySeries(), iLowest(), iHighest()
-#define MODE_OPEN                      0        // open price
-#define MODE_LOW                       1        // low price
-#define MODE_HIGH                      2        // high price
-#define MODE_CLOSE                     3        // close price
-#define MODE_VOLUME                    4        // volume
-#define MODE_TIME                      5        // bar open time
+// timeseries identifiers, see ArrayCopySeries(), iLowest(), iHighest()
+#define MODE_OPEN                         0     // open price
+#define MODE_LOW                          1     // low price
+#define MODE_HIGH                         2     // high price
+#define MODE_CLOSE                        3     // close price
+#define MODE_VOLUME                       4     // volume
+#define MODE_TIME                         5     // bar open time
 
 
-// MA method identifiers, siehe iMA()
-#define MODE_SMA                       0        // simple moving average
-#define MODE_EMA                       1        // exponential moving average
-#define MODE_SMMA                      2        // smoothed moving average: SMMA(n) = EMA(2*n-1)
-#define MODE_LWMA                      3        // linear weighted moving average
-#define MODE_ALMA                      4        // Arnaud Legoux moving average
+// MA method identifiers, see iMA()
+#define MODE_SMA                          0     // simple moving average
+#define MODE_EMA                          1     // exponential moving average
+#define MODE_SMMA                         2     // smoothed moving average, same as EMA: SMMA(n) = EMA(2*n-1)
+#define MODE_LWMA                         3     // linear weighted moving average
+#define MODE_ALMA                         4     // Arnaud Legoux moving average
 
 
-// Indicator line identifiers, siehe iMACD(), iRVI(), iStochastic()
-#define MODE_MAIN                      0        // base indicator line
-#define MODE_SIGNAL                    1        // signal line
+// indicator drawing shapes
+#define DRAW_LINE                         0     // drawing line
+#define DRAW_SECTION                      1     // drawing sections
+#define DRAW_HISTOGRAM                    2     // drawing histogram
+#define DRAW_ARROW                        3     // drawing arrows (symbols)
+#define DRAW_ZIGZAG                       4     // drawing sections between even and odd indicator buffers
+#define DRAW_NONE                         2     // no drawing
 
 
-// Indicator line identifiers, siehe iADX()
-#define MODE_MAIN                      0        // base indicator line
-#define MODE_PLUSDI                    1        // +DI indicator line
-#define MODE_MINUSDI                   2        // -DI indicator line
+// indicator line styles
+#define STYLE_SOLID                       0     // pen is solid
+#define STYLE_DASH                        1     // pen is dashed
+#define STYLE_DOT                         2     // pen is dotted
+#define STYLE_DASHDOT                     3     // pen has alternating dashes and dots
+#define STYLE_DASHDOTDOT                  4     // pen has alternating dashes and double dots
 
 
-// Indicator line identifiers, siehe iBands(), iEnvelopes(), iEnvelopesOnArray(), iFractals(), iGator()
-#define MODE_UPPER                     1        // upper line
-#define MODE_LOWER                     2        // lower line
+// indicator line identifiers, see iMACD(), iRVI(), iStochastic()
+#define MODE_MAIN                         0     // main indicator line
+#define MODE_SIGNAL                       1     // signal line
 
-#define B_LOWER                        0        // custom
-#define B_UPPER                        1        // custom
+// indicator line identifiers, see iADX()
+#define MODE_MAIN                         0     // base indicator line
+#define MODE_PLUSDI                       1     // +DI indicator line
+#define MODE_MINUSDI                      2     // -DI indicator line
 
+// indicator line identifiers, see iBands(), iEnvelopes(), iEnvelopesOnArray(), iFractals(), iGator()
+#define MODE_UPPER                        1     // upper line
+#define MODE_LOWER                        2     // lower line
 
-// Indicator drawing shapes
-#define DRAW_LINE                      0        // drawing line
-#define DRAW_SECTION                   1        // drawing sections
-#define DRAW_HISTOGRAM                 2        // drawing histogram
-#define DRAW_ARROW                     3        // drawing arrows (symbols)
-#define DRAW_ZIGZAG                    4        // drawing sections between even and odd indicator buffers
-#define DRAW_NONE                      2        // no drawing
-
-
-// Indicator line styles
-#define STYLE_SOLID                    0        // pen is solid
-#define STYLE_DASH                     1        // pen is dashed
-#define STYLE_DOT                      2        // pen is dotted
-#define STYLE_DASHDOT                  3        // pen has alternating dashes and dots
-#define STYLE_DASHDOTDOT               4        // pen has alternating dashes and double dots
+#define B_LOWER                           0     // custom
+#define B_UPPER                           1     // custom
 
 
-#define Bands.MODE_MA                  0        // MA value
-#define Bands.MODE_UPPER               1        // upper band value
-#define Bands.MODE_LOWER               2        // lower band value
+// custom indicator line identifiers
+#define Bands.MODE_MA                     0     // MA value
+#define Bands.MODE_UPPER                  1     // upper band value
+#define Bands.MODE_LOWER                  2     // lower band value
 
-#define Fisher.MODE_MAIN               0        // Fisher Transform main line
-#define Fisher.MODE_SECTION            1        // Fisher Transform section and section length
+#define Broketrader.MODE_MA               6     // Broketrader SMA value
+#define Broketrader.MODE_TREND            7     // Broketrader trend direction and length
 
-#define HalfTrend.MODE_MAIN            0        // HalfTrend SR line
-#define HalfTrend.MODE_TREND           1        // HalfTrend trend direction and length
+#define Fisher.MODE_MAIN          MODE_MAIN     // Fisher Transform main line (0)
+#define Fisher.MODE_SECTION               1     // Fisher Transform section and section length
 
-#define MACD.MODE_MAIN                 0        // MACD main line
-#define MACD.MODE_SECTION              1        // MACD section and section length
+#define FDI.MODE_MAIN             MODE_MAIN     // Fractal Dimension main line (0)
 
-#define MMI.MODE_MAIN                  0        // MMI main line
+#define HeikinAshi.MODE_OPEN              0     // Heikin-Ashi bar open price
+#define HeikinAshi.MODE_CLOSE             1     // Heikin-Ashi bar close price
+#define HeikinAshi.MODE_TREND             4     // Heikin-Ashi trend direction and length
 
-#define MovingAverage.MODE_MA          0        // MA value
-#define MovingAverage.MODE_TREND       1        // MA trend direction and length
+#define HalfTrend.MODE_MAIN       MODE_MAIN     // HalfTrend SR line (0)
+#define HalfTrend.MODE_TREND              1     // HalfTrend trend direction and length
 
-#define RSI.MODE_MAIN                  0        // RSI main line
-#define RSI.MODE_SECTION               1        // RSI section and section length (midpoint = 50)
+#define MACD.MODE_MAIN            MODE_MAIN     // MACD main line (0)
+#define MACD.MODE_SECTION                 1     // MACD section and section length
 
-#define Slope.MODE_MAIN                0        // slope main line
-#define Slope.MODE_TREND               1        // slope trend direction and length
+#define MMI.MODE_MAIN             MODE_MAIN     // MMI main line (0)
 
-#define SuperTrend.MODE_MAIN           0        // SuperTrend SR line
-#define SuperTrend.MODE_TREND          1        // SuperTrend trend direction and length
+#define MovingAverage.MODE_MA             0     // MA value
+#define MovingAverage.MODE_TREND          1     // MA trend direction and length
+
+#define RSI.MODE_MAIN             MODE_MAIN     // RSI main line (0)
+#define RSI.MODE_SECTION                  1     // RSI section and section length (midpoint = 50)
+
+#define Slope.MODE_MAIN           MODE_MAIN     // slope main line (0)
+#define Slope.MODE_TREND                  1     // slope trend direction and length
+
+#define Stochastic.MODE_MAIN      MODE_MAIN     // Stochastic main line   (0)
+#define Stochastic.MODE_SIGNAL  MODE_SIGNAL     // Stochastic signal line (1)
+#define Stochastic.MODE_TREND             2     // Stochastic trend direction and length
+
+#define SuperTrend.MODE_MAIN      MODE_MAIN     // SuperTrend SR line (0)
+#define SuperTrend.MODE_TREND             1     // SuperTrend trend direction and length
 
 
-// Sorting modes, siehe ArraySort()
-#define MODE_ASC                       1        // aufsteigend
-#define MODE_DESC                      2        // absteigend
-#define MODE_ASCEND             MODE_ASC        // MetaQuotes-Aliasse
-#define MODE_DESCEND           MODE_DESC
+// sorting modes, see ArraySort()
+#define MODE_ASC                          1     // aufsteigend
+#define MODE_DESC                         2     // absteigend
+#define MODE_ASCEND                MODE_ASC     // MetaQuotes aliases
+#define MODE_DESCEND              MODE_DESC
 
 
 // Market info identifiers, siehe MarketInfo()
-#define MODE_LOW                       1        // session low price (since midnight server time)
-#define MODE_HIGH                      2        // session high price (since midnight server time)
-//                                     3        // ???
-//                                     4        // ???
-#define MODE_TIME                      5        // last tick time
-//                                     6        // ???
-//                                     7        // ???
-//                                     8        // ???
-#define MODE_BID                       9        // last bid price                           (entspricht Bid bzw. Close[0])
-#define MODE_ASK                      10        // last ask price                           (entspricht Ask)
-#define MODE_POINT                    11        // point size in the quote currency         (entspricht Point)                           Preisauflösung: 0.0000'1
-#define MODE_DIGITS                   12        // number of digits after the decimal point (entspricht Digits)
-#define MODE_SPREAD                   13        // spread value in points
-#define MODE_STOPLEVEL                14        // stops distance level in points
-#define MODE_LOTSIZE                  15        // units of 1 lot                                                                                         100.000
-#define MODE_TICKVALUE                16        // tick value in the account currency
-#define MODE_TICKSIZE                 17        // tick size in the quote currency                                                 Vielfaches von Point: 0.0000'5
-#define MODE_SWAPLONG                 18        // swap of long positions
-#define MODE_SWAPSHORT                19        // swap of short positions
-#define MODE_STARTING                 20        // contract starting date (usually for futures)
-#define MODE_EXPIRATION               21        // contract expiration date (usually for futures)
-#define MODE_TRADEALLOWED             22        // if trading is allowed for the symbol
-#define MODE_MINLOT                   23        // minimum lot size
-#define MODE_LOTSTEP                  24        // minimum lot increment size
-#define MODE_MAXLOT                   25        // maximum lot size
-#define MODE_SWAPTYPE                 26        // swap calculation method: 0 - in points; 1 - in base currency; 2 - by interest; 3 - in margin currency
-#define MODE_PROFITCALCMODE           27        // profit calculation mode: 0 - Forex; 1 - CFD; 2 - Futures
-#define MODE_MARGINCALCMODE           28        // margin calculation mode: 0 - Forex; 1 - CFD; 2 - Futures; 3 - CFD for indices
-#define MODE_MARGININIT               29        // units with margin requirement for opening a position of 1 lot        (0 = entsprechend MODE_MARGINREQUIRED)  100.000  @see (1)
-#define MODE_MARGINMAINTENANCE        30        // units with margin requirement to maintain an open positions of 1 lot (0 = je nach Account-Stopoutlevel)               @see (2)
-#define MODE_MARGINHEDGED             31        // units with margin requirement for a hedged position of 1 lot                                                  50.000
-#define MODE_MARGINREQUIRED           32        // free margin requirement to open a position of 1 lot
-#define MODE_FREEZELEVEL              33        // order freeze level in points
+#define MODE_LOW                          1     // session low price (since midnight server time)
+#define MODE_HIGH                         2     // session high price (since midnight server time)
+//                                        3     // ?
+//                                        4     // ?
+#define MODE_TIME                         5     // last tick time
+//                                        6     // ?
+//                                        7     // ?
+//                                        8     // ?
+#define MODE_BID                          9     // last bid price                           (entspricht Bid bzw. Close[0])
+#define MODE_ASK                         10     // last ask price                           (entspricht Ask)
+#define MODE_POINT                       11     // point size in the quote currency         (entspricht Point)                           Preisauflösung: 0.0000'1
+#define MODE_DIGITS                      12     // number of digits after the decimal point (entspricht Digits)
+#define MODE_SPREAD                      13     // spread value in points
+#define MODE_STOPLEVEL                   14     // stops distance level in points
+#define MODE_LOTSIZE                     15     // units of 1 lot                                                                                         100.000
+#define MODE_TICKVALUE                   16     // tick value in the account currency
+#define MODE_TICKSIZE                    17     // tick size in the quote currency                                                 Vielfaches von Point: 0.0000'5
+#define MODE_SWAPLONG                    18     // swap of long positions
+#define MODE_SWAPSHORT                   19     // swap of short positions
+#define MODE_STARTING                    20     // contract starting date (usually for futures)
+#define MODE_EXPIRATION                  21     // contract expiration date (usually for futures)
+#define MODE_TRADEALLOWED                22     // if trading is allowed for the symbol
+#define MODE_MINLOT                      23     // minimum lot size
+#define MODE_LOTSTEP                     24     // minimum lot increment size
+#define MODE_MAXLOT                      25     // maximum lot size
+#define MODE_SWAPTYPE                    26     // swap calculation method: 0 - in points; 1 - in base currency; 2 - by interest; 3 - in margin currency
+#define MODE_PROFITCALCMODE              27     // profit calculation mode: 0 - Forex; 1 - CFD; 2 - Futures
+#define MODE_MARGINCALCMODE              28     // margin calculation mode: 0 - Forex; 1 - CFD; 2 - Futures; 3 - CFD for indices
+#define MODE_MARGININIT                  29     // units with margin requirement for opening a position of 1 lot        (0 = entsprechend MODE_MARGINREQUIRED)  100.000  @see (1)
+#define MODE_MARGINMAINTENANCE           30     // units with margin requirement to maintain an open positions of 1 lot (0 = je nach Account-Stopoutlevel)               @see (2)
+#define MODE_MARGINHEDGED                31     // units with margin requirement for a hedged position of 1 lot                                                  50.000
+#define MODE_MARGINREQUIRED              32     // free margin requirement to open a position of 1 lot
+#define MODE_FREEZELEVEL                 33     // order freeze level in points
                                                 //
                                                 // (1) MARGIN_INIT (in Units) müßte, wenn es gesetzt ist, die eigentliche Marginrate sein. MARGIN_REQUIRED (in Account-Currency)
                                                 //     könnte höher und MARGIN_MAINTENANCE niedriger sein (MARGIN_INIT wird z.B. von IC Markets gesetzt).
@@ -407,18 +372,6 @@ double  N_INF;                                              // -1.#INF: negative
                                                 // (2) Ein Account-Stopoutlevel < 100% ist gleichbedeutend mit einem einheitlichen MARGIN_MAINTENANCE < MARGIN_INIT über alle
                                                 //     Instrumente. Eine vom Stopoutlevel des Accounts abweichende MARGIN_MAINTENANCE einzelner Instrumente ist vermutlich nur
                                                 //     bei einem Stopoutlevel von 100% sinnvoll. Beides zusammen ist ziemlich verwirrend.
-
-// Price identifiers, siehe iMA() etc.
-#define PRICE_CLOSE                    0        // C
-#define PRICE_OPEN                     1        // O
-#define PRICE_HIGH                     2        // H
-#define PRICE_LOW                      3        // L
-#define PRICE_MEDIAN                   4        // (H+L)/2
-#define PRICE_TYPICAL                  5        // (H+L+C)/3
-#define PRICE_WEIGHTED                 6        // (H+L+C+C)/4
-#define PRICE_BID                      7        // Bid
-#define PRICE_ASK                      8        // Ask
-
 
 /*
  The ENUM_SYMBOL_CALC_MODE enumeration provides information about how a symbol's margin requirements are calculated.
@@ -474,17 +427,6 @@ double  N_INF;                                              // -1.#INF: negative
 #define SCM_BASE_CURRENCY              1        // as amount of base currency   (see "symbols.raw")
 #define SCM_INTEREST                   2        // in percentage terms
 #define SCM_MARGIN_CURRENCY            3        // as amount of margin currency (see "symbols.raw")
-
-
-// Commission calculation modes, siehe FXT_HEADER
-#define COMMISSION_MODE_MONEY          0
-#define COMMISSION_MODE_PIPS           1
-#define COMMISSION_MODE_PERCENT        2
-
-
-// Commission types, siehe FXT_HEADER
-#define COMMISSION_TYPE_RT             0        // round-turn (both deals)
-#define COMMISSION_TYPE_PER_DEAL       1        // per single deal
 
 
 // Symbol types, siehe struct SYMBOL
@@ -667,30 +609,6 @@ double  N_INF;                                              // -1.#INF: negative
 #define SYMBOL_CHECKSIGN                   252  // checkmark symbol
 
 
-// flags marking errors handled by custom error handlers (the errors don't trigger a terminating ERROR alert)
-#define F_ERR_CONCURRENT_MODIFICATION  0x00000001  //      1
-#define F_ERS_EXECUTION_STOPPING       0x00000002  //      2   temporary state
-#define F_ERS_HISTORY_UPDATE           0x00000004  //      4   temporary state
-#define F_ERR_INVALID_PARAMETER        0x00000008  //      8
-#define F_ERR_INVALID_STOP             0x00000010  //     16
-#define F_ERR_INVALID_TICKET           0x00000020  //     32
-#define F_ERR_INVALID_TRADE_PARAMETERS 0x00000040  //     64
-#define F_ERR_MARKET_CLOSED            0x00000080  //    128
-#define F_ERR_NO_CONNECTION            0x00000100  //    256
-#define F_ERR_NO_RESULT                0x00000200  //    512
-#define F_ERR_OFF_QUOTES               0x00000400  //   1024
-#define F_ERR_ORDER_CHANGED            0x00000800  //   2048
-#define F_ERR_SERIES_NOT_AVAILABLE     0x00001000  //   4096
-#define F_ERS_TERMINAL_NOT_YET_READY   0x00002000  //   8192   temporary state
-#define F_ERR_TRADE_DISABLED           0x00004000  //  16384
-#define F_ERR_TRADE_MODIFY_DENIED      0x00008000  //  32768
-#define F_ERR_TRADESERVER_GONE         0x00010000  //  65536
-
-// flags controlling order execution
-#define F_OE_DONT_HEDGE                0x00020000  // 131072 (don't hedge multiple positions on close)
-#define F_OE_DONT_CHECK_STATUS         0x00040000  // 262144 (don't check order status before proceeding)
-
-
 // String padding types, siehe StringPad()
 #define STR_PAD_LEFT                         1
 #define STR_PAD_RIGHT                        2
@@ -759,123 +677,3 @@ double  N_INF;                                              // -1.#INF: negative
 #define STAT_PROFIT_LONGTRADES           99999  // Profitable long trades int
 #define STAT_PROFITTRADES_AVGCON         99999  // Average length of a profitable series of trades int
 #define STAT_LOSSTRADES_AVGCON           99999  // Average length of a losing series of trades int
-
-
-// AccountCompany-ShortNames
-#define AC.Alpari                        "Alpari"
-#define AC.APBG                          "APBG"
-#define AC.ATCBrokers                    "ATCBrokers"
-#define AC.AxiTrader                     "AxiTrader"
-#define AC.BroCo                         "BroCo"
-#define AC.CollectiveFX                  "CollectiveFX"
-#define AC.Dukascopy                     "Dukascopy"
-#define AC.EasyForex                     "EasyForex"
-#define AC.FBCapital                     "FBCapital"
-#define AC.FinFX                         "FinFX"
-#define AC.ForexLtd                      "ForexLtd"
-#define AC.FXPrimus                      "FXPrimus"
-#define AC.FXDD                          "FXDD"
-#define AC.FXOpen                        "FXOpen"
-#define AC.FxPro                         "FxPro"
-#define AC.Gallant                       "Gallant"
-#define AC.GCI                           "GCI"
-#define AC.GFT                           "GFT"
-#define AC.GlobalPrime                   "GlobalPrime"
-#define AC.ICMarkets                     "ICMarkets"
-#define AC.InovaTrade                    "InovaTrade"
-#define AC.InvestorsEurope               "InvestorsEurope"
-#define AC.JFDBrokers                    "JFDBrokers"
-#define AC.LiteForex                     "LiteForex"
-#define AC.LondonCapital                 "LondonCapital"
-#define AC.MBTrading                     "MBTrading"
-#define AC.MetaQuotes                    "MetaQuotes"
-#define AC.MIG                           "MIG"
-#define AC.Oanda                         "Oanda"
-#define AC.Pepperstone                   "Pepperstone"
-#define AC.PrimeXM                       "PrimeXM"
-#define AC.SimpleTrader                  "SimpleTrader"
-#define AC.STS                           "STS"
-#define AC.TeleTrade                     "TeleTrade"
-#define AC.TickMill                      "TickMill"
-#define AC.XTrade                        "XTrade"
-
-
-// AccountCompany-ID's
-#define AC_ID.Alpari                     1001
-#define AC_ID.APBG                       1002
-#define AC_ID.ATCBrokers                 1003
-#define AC_ID.AxiTrader                  1004
-#define AC_ID.BroCo                      1005
-#define AC_ID.CollectiveFX               1006
-#define AC_ID.Dukascopy                  1007
-#define AC_ID.EasyForex                  1008
-#define AC_ID.FBCapital                  1009
-#define AC_ID.FinFX                      1010
-#define AC_ID.ForexLtd                   1011
-#define AC_ID.FXPrimus                   1012
-#define AC_ID.FXDD                       1013
-#define AC_ID.FXOpen                     1014
-#define AC_ID.FxPro                      1015
-#define AC_ID.Gallant                    1016
-#define AC_ID.GCI                        1017
-#define AC_ID.GFT                        1018
-#define AC_ID.GlobalPrime                1019
-#define AC_ID.ICMarkets                  1020
-#define AC_ID.InovaTrade                 1021
-#define AC_ID.InvestorsEurope            1022
-#define AC_ID.JFDBrokers                 1023
-#define AC_ID.LiteForex                  1024
-#define AC_ID.LondonCapital              1025
-#define AC_ID.MBTrading                  1026
-#define AC_ID.MetaQuotes                 1027
-#define AC_ID.MIG                        1028
-#define AC_ID.Oanda                      1029
-#define AC_ID.Pepperstone                1030
-#define AC_ID.PrimeXM                    1031
-#define AC_ID.SimpleTrader               1032
-#define AC_ID.STS                        1033
-#define AC_ID.TeleTrade                  1034
-#define AC_ID.TickMill                   1035
-#define AC_ID.XTrade                     1036
-
-
-// SimpleTrader Account-Aliasse
-#define STA_ALIAS.AlexProfit             "alexprofit"
-#define STA_ALIAS.ASTA                   "asta"
-#define STA_ALIAS.Caesar2                "caesar2"
-#define STA_ALIAS.Caesar21               "caesar21"
-#define STA_ALIAS.ConsistentProfit       "consistent"
-#define STA_ALIAS.DayFox                 "dayfox"
-#define STA_ALIAS.FXViper                "fxviper"
-#define STA_ALIAS.GCEdge                 "gcedge"
-#define STA_ALIAS.GoldStar               "goldstar"
-#define STA_ALIAS.Kilimanjaro            "kilimanjaro"
-#define STA_ALIAS.NovoLRfund             "novolr"
-#define STA_ALIAS.OverTrader             "overtrader"
-#define STA_ALIAS.Ryan                   "ryan"
-#define STA_ALIAS.SmartScalper           "smartscalper"
-#define STA_ALIAS.SmartTrader            "smarttrader"
-#define STA_ALIAS.SteadyCapture          "steadycapture"
-#define STA_ALIAS.Twilight               "twilight"
-#define STA_ALIAS.YenFortress            "yenfortress"
-
-
-// SimpleTrader Account-ID's (entsprechen den ID's der SimpleTrader-URLs)
-#define STA_ID.AlexProfit             2474
-#define STA_ID.ASTA                   2370
-#define STA_ID.Caesar2                1619
-#define STA_ID.Caesar21               1803
-#define STA_ID.ConsistentProfit       4351
-#define STA_ID.DayFox                 2465
-#define STA_ID.FXViper                 633
-#define STA_ID.GCEdge                  998
-#define STA_ID.GoldStar               2622
-#define STA_ID.Kilimanjaro            2905
-#define STA_ID.NovoLRfund             4322
-#define STA_ID.OverTrader             2973
-#define STA_ID.Ryan                   5611
-#define STA_ID.SmartScalper           1086
-#define STA_ID.SmartTrader            1081
-#define STA_ID.SteadyCapture          4023
-#define STA_ID.Twilight               3913
-#define STA_ID.YenFortress            2877

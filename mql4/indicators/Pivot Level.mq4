@@ -2,8 +2,8 @@
  * Pivot levels
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[] = {INIT_TIMEZONE};
-int __DEINIT_FLAGS__[];
+int   __InitFlags[] = {INIT_TIMEZONE};
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -104,8 +104,8 @@ int onDeinitRecompile() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(R3)) return(log("onTick(1)  size(R3) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(R3)) return(logInfo("onTick(1)  size(R3) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
    // reset all buffers and delete garbage before doing a full recalculation
    if (!UnchangedBars) {
@@ -290,7 +290,7 @@ int iPivotLevel_new(datetime time, int period/*=NULL*/, double &results[]) {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
    IndicatorBuffers(indicator_buffers);
@@ -311,7 +311,7 @@ void SetIndicatorOptions() {
  * @return bool - success status
  */
 bool StoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.StoreInt   (name +".input.Periods",          Periods         );
    Chart.StoreInt   (name +".input.SR.Levels",        SR.Levels       );
    Chart.StoreColor (name +".input.Color.Resistance", Color.Resistance);
@@ -327,7 +327,7 @@ bool StoreInputParameters() {
  * @return bool - success status
  */
 bool RestoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.RestoreInt  (name +".input.Periods",          Periods         );
    Chart.RestoreInt  (name +".input.SR.Levels",        SR.Levels       );
    Chart.RestoreColor(name +".input.Color.Resistance", Color.Resistance);

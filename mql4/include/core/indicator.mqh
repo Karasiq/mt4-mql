@@ -1,11 +1,11 @@
 
-int __WHEREAMI__ = NULL;                                             // current MQL core function: CF_INIT|CF_START|CF_DEINIT
+int __CoreFunction = NULL;                                           // currently executed MQL core function: CF_INIT|CF_START|CF_DEINIT
 
 extern string ___________________________;
 extern int    __lpSuperContext;
 
 // current price series
-double rates[][6];
+double __rates[][6];
 
 
 /**
@@ -17,18 +17,18 @@ int init() {
    if (__STATUS_OFF)
       return(__STATUS_OFF.reason);
 
-   if (__WHEREAMI__ == NULL)                                         // init() called by the terminal, all variables are reset
-      __WHEREAMI__ = CF_INIT;
+   if (__CoreFunction == NULL)                                       // init() called by the terminal, all variables are reset
+      __CoreFunction = CF_INIT;
 
    if (!IsDllsAllowed()) {
-      ForceAlert("DLL function calls are not enabled. Please go to Tools -> Options -> Expert Advisors and allow DLL imports.");
+      ForceAlert("Please enable DLL function calls for this indicator.");
       last_error          = ERR_DLL_CALLS_NOT_ALLOWED;
       __STATUS_OFF        = true;
       __STATUS_OFF.reason = last_error;
       return(last_error);
    }
    if (!IsLibrariesAllowed()) {
-      ForceAlert("MQL library calls are not enabled. Please load the indicator with \"Allow imports of external experts\" enabled.");
+      ForceAlert("Please enable MQL library calls for this indicator.");
       last_error          = ERR_EX4_CALLS_NOT_ALLOWED;
       __STATUS_OFF        = true;
       __STATUS_OFF.reason = last_error;
@@ -40,7 +40,7 @@ int init() {
    int hChart = NULL; if (!IsTesting() || IsVisualMode())            // in Tester WindowHandle() triggers ERR_FUNC_NOT_ALLOWED_IN_TESTER
        hChart = WindowHandle(Symbol(), NULL);                        // if VisualMode=Off
 
-   int error = SyncMainContext_init(__ExecutionContext, MT_INDICATOR, WindowExpertName(), UninitializeReason(), SumInts(__INIT_FLAGS__), SumInts(__DEINIT_FLAGS__), Symbol(), Period(), Digits, Point, false, false, IsTesting(), IsVisualMode(), IsOptimization(), __lpSuperContext, hChart, WindowOnDropped(), WindowXOnDropped(), WindowYOnDropped());
+   int error = SyncMainContext_init(__ExecutionContext, MT_INDICATOR, WindowExpertName(), UninitializeReason(), SumInts(__InitFlags), SumInts(__DeinitFlags), Symbol(), Period(), Digits, Point, false, false, IsTesting(), IsVisualMode(), IsOptimization(), __lpSuperContext, hChart, WindowOnDropped(), WindowXOnDropped(), WindowYOnDropped());
    if (!error) error = GetLastError();                               // detect a DLL exception
    if (IsError(error)) {
       ForceAlert("ERROR:   "+ Symbol() +","+ PeriodDescription(Period()) +"  "+ WindowExpertName() +"::init(1)->SyncMainContext_init()  ["+ ErrorToStr(error) +"]");
@@ -57,7 +57,7 @@ int init() {
 
 
    // (2) finish initialization
-   if (!init.GlobalVars()) if (CheckErrors("init(2)")) return(last_error);
+   if (!initContext()) if (CheckErrors("init(2)")) return(last_error);
 
 
    // (3) execute custom init tasks
@@ -71,30 +71,27 @@ int init() {
       error = GetLastError();
       if (IsError(error)) {                                          // - symbol not yet subscribed (start, account/template change), it may "show up" later
          if (error == ERR_SYMBOL_NOT_AVAILABLE)                      // - synthetic symbol in offline chart
-            return(_last_error(log("init(4)  MarketInfo() => ERR_SYMBOL_NOT_AVAILABLE", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("init(5)")));
+            return(_last_error(logInfo("init(4)  MarketInfo() => ERR_SYMBOL_NOT_AVAILABLE", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("init(5)")));
          if (CheckErrors("init(6)", error)) return(last_error);
       }
-      if (!TickSize) return(_last_error(log("init(7)  MarketInfo(MODE_TICKSIZE) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("init(8)")));
+      if (!TickSize) return(_last_error(logInfo("init(7)  MarketInfo(MODE_TICKSIZE) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("init(8)")));
 
       double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
       error = GetLastError();
       if (IsError(error))
          if (CheckErrors("init(9)", error)) return( last_error);
-      if (!tickValue)                       return(_last_error(log("init(10)  MarketInfo(MODE_TICKVALUE) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("init(11)")));
+      if (!tickValue)                       return(_last_error(logInfo("init(10)  MarketInfo(MODE_TICKVALUE) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("init(11)")));
    }
    if (initFlags & INIT_BARS_ON_HIST_UPDATE && 1) {}                 // not yet implemented
 
-
-   // (4) before onInit(): if loaded by iCustom() log original input parameters
-   string initialInput;
-   if (IsSuperContext() && __LOG()) {
-      //initialInput = InputsToStr();                                // un-comment for debugging only
-      if (StringLen(initialInput) > 0) {
-         initialInput = StringConcatenate(initialInput, NL, "__lpSuperContext=0x"+ IntToHexStr(__lpSuperContext), ";");
-         log("init()  input: "+ initialInput);
+   // (4) before onInit(): if loaded by iCustom() log input parameters
+   if (IsSuperContext()) /*&&*/ if (IsLogDebug()) {
+      string sInput = InputsToStr();
+      if (StringLen(sInput) > 0) {
+         sInput = sInput + NL +"__lpSuperContext=0x"+ IntToHexStr(__lpSuperContext) +";";
+         logDebug("init(11)  input: "+ sInput);
       }
    }
-
 
    /*
    (5) User-spezifische init()-Routinen aufrufen. Diese können, müssen aber nicht implementiert sein.
@@ -141,20 +138,7 @@ int init() {
    if (error != -1)                                                                    //
       error = afterInit();                                                             // Postprocessing-Hook
 
-
-   // (6) after onInit(): if loaded by iCustom() log modified input parameters
-   if (IsSuperContext() && __LOG()) {
-      string modifiedInput = InputsToStr();
-      if (StringLen(modifiedInput) > 0) {
-         modifiedInput = StringConcatenate(modifiedInput, NL, "__lpSuperContext=0x"+ IntToHexStr(__lpSuperContext), ";");
-         modifiedInput = InputParamsDiff(initialInput, modifiedInput);
-         if (StringLen(modifiedInput) > 0)
-            log("init()  input: "+ modifiedInput);
-      }
-   }
-
-
-   // (7) nach Parameteränderung im "Indicators List"-Window nicht auf den nächsten Tick warten
+   // (6) nach Parameteränderung im "Indicators List"-Window nicht auf den nächsten Tick warten
    if (initReason == INITREASON_PARAMETERS) {
       Chart.SendTick();                         // TODO: Nur bei existierendem "Indicators List"-Window (nicht bei einzelnem Indikator).
    }                                            // TODO: Nicht im Tester-Chart. Oder nicht etwa doch?
@@ -165,13 +149,13 @@ int init() {
 
 
 /**
- * Update global variables and the indicator's EXECUTION_CONTEXT.
+ * Update global variables and the indicator's EXECUTION_CONTEXT. Called immediately after SyncMainContext_init().
  *
  * @return bool - success status
  *
- * Note: The memory location of an indicator's EXECUTION_CONTEXT changes with every init cycle.
+ * Note: The memory location of an indicator's EXECUTION_CONTEXT changes on every init cycle.
  */
-bool init.GlobalVars() {
+bool initContext() {
    //
    // Terminal bug 1: On opening of a new chart window and on account change the global constants Digits and Point are in
    //                 init() always set to 5 and 0.00001, irrespective of the actual symbol. Only a reload of
@@ -194,25 +178,13 @@ bool init.GlobalVars() {
    PipPriceFormat = StringConcatenate(".", PipDigits);                    SubPipPriceFormat = StringConcatenate(PipPriceFormat, "'");
    PriceFormat    = ifString(Digits==PipDigits, PipPriceFormat, SubPipPriceFormat);
    Tick           = __ExecutionContext[EC.ticks       ];
-   Tick.Time      = __ExecutionContext[EC.lastTickTime];
+   Tick.Time      = __ExecutionContext[EC.currTickTime];
 
-   __lpSuperContext = __ExecutionContext[EC.superContext];
-   if (!__lpSuperContext) {                                       // with a supercontext this context is already up-to-date
-      ec_SetLogEnabled          (__ExecutionContext, init.IsLogEnabled());
-      ec_SetLogToDebugEnabled   (__ExecutionContext, GetConfigBool("Logging", "LogToDebug", true));
-      ec_SetLogToTerminalEnabled(__ExecutionContext, true);
-   }
+   N_INF = MathLog(0);                                      // negative infinity
+   P_INF = -N_INF;                                          // positive infinity
+   NaN   =  N_INF - N_INF;                                  // not-a-number
 
-   __LOG_WARN.mail  = false;
-   __LOG_WARN.sms   = false;
-   __LOG_ERROR.mail = false;
-   __LOG_ERROR.sms  = false;
-
-   N_INF = MathLog(0);
-   P_INF = -N_INF;
-   NaN   =  N_INF - N_INF;
-
-   return(!catch("init.GlobalVars(1)"));
+   return(!catch("initContext(1)"));
 }
 
 
@@ -255,7 +227,7 @@ int start() {
 
 
    // (2) Abschluß der Chart-Initialisierung überprüfen (Bars=0 kann bei Terminal-Start auftreten)
-   if (!Bars) return(_last_error(log("start(2)  Bars=0", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("start(3)")));
+   if (!Bars) return(_last_error(logInfo("start(2)  Bars=0", SetLastError(ERS_TERMINAL_NOT_YET_READY)), CheckErrors("start(3)")));
 
 
    // (3) Tickstatus bestimmen
@@ -337,8 +309,8 @@ int start() {
 
 
    // (5) Falls wir aus init() kommen, dessen Ergebnis prüfen
-   if (__WHEREAMI__ == CF_INIT) {
-      __WHEREAMI__ = ec_SetProgramCoreFunction(__ExecutionContext, CF_START);       // __STATUS_OFF ist false: evt. ist jedoch ein Status gesetzt, siehe CheckErrors()
+   if (__CoreFunction == CF_INIT) {
+      __CoreFunction = ec_SetProgramCoreFunction(__ExecutionContext, CF_START);     // __STATUS_OFF ist false: evt. ist jedoch ein Status gesetzt, siehe CheckErrors()
 
       if (last_error == ERS_TERMINAL_NOT_YET_READY) {                               // alle anderen Stati brauchen zur Zeit keine eigene Behandlung
          debug("start(7)  init() returned ERS_TERMINAL_NOT_YET_READY, retrying...");
@@ -348,7 +320,7 @@ int start() {
          if (__STATUS_OFF) return(last_error);
 
          if (error == ERS_TERMINAL_NOT_YET_READY) {                                 // wenn überhaupt, kann wieder nur ein Status gesetzt sein
-            __WHEREAMI__ = ec_SetProgramCoreFunction(__ExecutionContext, CF_INIT);  // __WHEREAMI__ zurücksetzen und auf den nächsten Tick warten
+            __CoreFunction = ec_SetProgramCoreFunction(__ExecutionContext, CF_INIT);// __CoreFunction zurücksetzen und auf den nächsten Tick warten
             return(error);
          }
       }
@@ -361,48 +333,36 @@ int start() {
       ec_SetDllError(__ExecutionContext, SetLastError(NO_ERROR));
 
       if      (prev_error == ERS_TERMINAL_NOT_YET_READY) UnchangedBars = 0;
-      else if (prev_error == ERS_HISTORY_UPDATE        ) UnchangedBars = 0;
       else if (prev_error == ERR_HISTORY_INSUFFICIENT  ) UnchangedBars = 0;
-      if      (__STATUS_HISTORY_UPDATE                 ) UnchangedBars = 0;         // *_HISTORY_UPDATE und *_HISTORY_INSUFFICIENT können je nach Kontext Fehler und/oder Status sein.
-      if      (__STATUS_HISTORY_INSUFFICIENT           ) UnchangedBars = 0;
+      else if (prev_error == ERS_HISTORY_UPDATE        ) UnchangedBars = 0;
+      if      (__STATUS_HISTORY_UPDATE                 ) UnchangedBars = 0;         // *_HISTORY_UPDATE kann je nach Kontext Fehler oder Status sein
    }
    if (!UnchangedBars) ShiftedBars = 0;
    ChangedBars = Bars - UnchangedBars;                                              // ChangedBars aktualisieren (UnchangedBars wurde evt. neu gesetzt)
 
+   __STATUS_HISTORY_UPDATE = false;
 
-   /*
-   // (6) Werden Zeichenpuffer verwendet, muß in onTick() deren Initialisierung überprüft werden.
-   if (ArraySize(buffer) == 0)
-      return(SetLastError(ERS_TERMINAL_NOT_YET_READY));                             // kann bei Terminal-Start auftreten
-   */
+   ArrayCopyRates(__rates);
 
-   __STATUS_HISTORY_UPDATE       = false;
-   __STATUS_HISTORY_INSUFFICIENT = false;
-
-   ArrayCopyRates(rates);
-
-   if (SyncMainContext_start(__ExecutionContext, rates, Bars, ChangedBars, Tick, Tick.Time, Bid, Ask) != NO_ERROR) {
+   if (SyncMainContext_start(__ExecutionContext, __rates, Bars, ChangedBars, Tick, Tick.Time, Bid, Ask) != NO_ERROR) {
       if (CheckErrors("start(8)")) return(last_error);
    }
 
-
-   // (7) bei Bedarf Input-Dialog aufrufen
+   // bei Bedarf Input-Dialog aufrufen
    if (__STATUS_RELAUNCH_INPUT) {
       __STATUS_RELAUNCH_INPUT = false;
       return(_last_error(start.RelaunchInputDialog(), CheckErrors("start(9)")));
    }
 
+   // Main-Funktion aufrufen
+   error = onTick();
+   if (error && error!=last_error) SetLastError(error);
 
-   // (8) Main-Funktion aufrufen
-   onTick();
-
-
-   // (9) check errors
+   // check errors
    error = GetLastError();
    if (error || last_error|__ExecutionContext[EC.mqlError]|__ExecutionContext[EC.dllError])
       CheckErrors("start(10)", error);
-   if      (last_error == ERS_HISTORY_UPDATE      ) __STATUS_HISTORY_UPDATE       = true;
-   else if (last_error == ERR_HISTORY_INSUFFICIENT) __STATUS_HISTORY_INSUFFICIENT = true;
+   if (last_error == ERS_HISTORY_UPDATE) __STATUS_HISTORY_UPDATE = true;
    return(last_error);
 }
 
@@ -413,7 +373,7 @@ int start() {
  * @return int - Fehlerstatus
  */
 int deinit() {
-   __WHEREAMI__ = CF_DEINIT;
+   __CoreFunction = CF_DEINIT;
 
    if (!IsDllsAllowed() || !IsLibrariesAllowed() || last_error==ERR_TERMINAL_INIT_FAILURE || last_error==ERR_DLL_EXCEPTION)
       return(last_error);
@@ -424,16 +384,14 @@ int deinit() {
    if (ProgramInitReason() == INITREASON_PROGRAM_AFTERTEST)
       return(error|last_error|LeaveContext(__ExecutionContext));
 
-
    // User-Routinen *können*, müssen aber nicht implementiert werden.
    //
    // Die User-Routinen werden ausgeführt, wenn der Preprocessing-Hook (falls implementiert) ohne Fehler zurückkehrt.
    // Der Postprocessing-Hook wird ausgeführt, wenn weder der Preprocessing-Hook (falls implementiert) noch die User-Routinen
    // (falls implementiert) -1 zurückgeben.
 
-
    // User-spezifische deinit()-Routinen aufrufen                                //
-   error = onDeinit();                                                           // Preprocessing-Hook
+   error = onDeinit();                                                           // preprocessing hook
                                                                                  //
    if (!error) {                                                                 //
       switch (UninitializeReason()) {                                            //
@@ -454,13 +412,8 @@ int deinit() {
             return(last_error|LeaveContext(__ExecutionContext));                 //
       }                                                                          //
    }                                                                             //
-   if (error != -1)                                                              //
-      error = afterDeinit();                                                     // Postprocessing-Hook
-
-
-   // User-spezifische Deinit-Tasks ausführen
-   if (!error) {
-   }
+   if (!error) error = afterDeinit();                                            // postprocessing hook
+   if (!error && !last_error && !This.IsTesting()) DeleteRegisteredObjects();
 
    CheckErrors("deinit(2)");
    return(last_error|LeaveContext(__ExecutionContext));                          // the very last statement
@@ -526,18 +479,18 @@ int DeinitReason() {
  * @return bool - whether the flag __STATUS_OFF is set
  */
 bool CheckErrors(string location, int setError = NULL) {
-   // (1) check and signal DLL errors
+   // check DLL errors
    int dll_error = __ExecutionContext[EC.dllError];                  // TODO: signal DLL errors
    if (dll_error && 1) {
       __STATUS_OFF        = true;                                    // all DLL errors are terminating errors
       __STATUS_OFF.reason = dll_error;
    }
 
-
-   // (2) check MQL errors
+   // check MQL errors
    int mql_error = __ExecutionContext[EC.mqlError];
    switch (mql_error) {
       case NO_ERROR:
+      case ERR_HISTORY_INSUFFICIENT:
       case ERS_HISTORY_UPDATE:
       case ERS_TERMINAL_NOT_YET_READY:
       case ERS_EXECUTION_STOPPING:
@@ -547,10 +500,10 @@ bool CheckErrors(string location, int setError = NULL) {
          __STATUS_OFF.reason = mql_error;                            // MQL errors have higher severity than DLL errors
    }
 
-
-   // (3) check last_error
+   // check last_error
    switch (last_error) {
       case NO_ERROR:
+      case ERR_HISTORY_INSUFFICIENT:
       case ERS_HISTORY_UPDATE:
       case ERS_TERMINAL_NOT_YET_READY:
       case ERS_EXECUTION_STOPPING:
@@ -560,8 +513,7 @@ bool CheckErrors(string location, int setError = NULL) {
          __STATUS_OFF.reason = last_error;                           // local errors have higher severity than library errors
    }
 
-
-   // (4) check uncatched errors
+   // check uncatched errors
    if (!setError) setError = GetLastError();
    if (setError && 1) {
       catch(location, setError);
@@ -569,8 +521,7 @@ bool CheckErrors(string location, int setError = NULL) {
       __STATUS_OFF.reason = setError;                                // all uncatched errors are terminating errors
    }
 
-
-   // (5) update variable last_error
+   // update variable last_error
    if (__STATUS_OFF) /*&&*/ if (!last_error)
       last_error = __STATUS_OFF.reason;
 
@@ -578,7 +529,6 @@ bool CheckErrors(string location, int setError = NULL) {
 
    // suppress compiler warnings
    __DummyCalls();
-   SetCustomLog(NULL);
 }
 
 
@@ -590,10 +540,10 @@ bool CheckErrors(string location, int setError = NULL) {
  * @return bool
  */
 bool EventListener_ChartCommand(string &commands[]) {
-   if (!__CHART()) return(false);
+   if (!IsChart()) return(false);
 
    static string label, mutex; if (!StringLen(label)) {
-      label = __NAME() +".command";
+      label = ProgramName() +".command";
       mutex = "mutex."+ label;
    }
 
@@ -610,18 +560,6 @@ bool EventListener_ChartCommand(string &commands[]) {
 }
 
 
-/**
- * Configure the use of a custom logfile.
- *
- * @param  string filename - name of a custom logfile or an empty string to disable custom logging
- *
- * @return bool - success status
- */
-bool SetCustomLog(string filename) {
-   return(SetCustomLogA(__ExecutionContext, filename));
-}
-
-
 // --------------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -630,12 +568,8 @@ bool SetCustomLog(string filename) {
    bool   ReleaseLock(string mutexName);
 
 #import "rsfExpander.dll"
-   int    ec_SetDllError            (int ec[], int error   );
-   bool   ec_SetLogEnabled          (int ec[], int status  );
-   bool   ec_SetLogToDebugEnabled   (int ec[], int status  );
-   bool   ec_SetLogToTerminalEnabled(int ec[], int status  );
-   int    ec_SetProgramCoreFunction (int ec[], int function);
-   bool   SetCustomLogA             (int ec[], string file);
+   int    ec_SetDllError           (int ec[], int error   );
+   int    ec_SetProgramCoreFunction(int ec[], int function);
 
    bool   ShiftIndicatorBuffer(double buffer[], int bufferSize, int bars, double emptyValue);
 

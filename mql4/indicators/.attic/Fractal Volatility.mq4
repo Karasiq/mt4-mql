@@ -8,8 +8,8 @@
  *    number of completed range bars per time. The displayed unit is "pip", that's range bars of 1 pip size.
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -34,10 +34,8 @@ extern string Vola.Type    = "Kaufman* | Intra-Bar";
 // buffers
 double bufferVola[];
 
-int    volaType;
-int    volaPeriods;
-
-string ind.shortName;
+int volaType;
+int volaPeriods;
 
 
 /**
@@ -70,9 +68,9 @@ int onInit() {
    SetIndexBuffer(0, bufferVola);
 
    // data display configuration, names, labels
-   ind.shortName = "Fractal Volatility("+ Vola.Periods +")  ";
-   IndicatorShortName(ind.shortName);                       // subwindow and context menu
-   SetIndexLabel(0, StrTrim(ind.shortName));                // "Data" window and tooltips
+   string name = "Fractal Volatility("+ Vola.Periods +")";
+   IndicatorShortName(name +"  ");                          // chart subwindow and context menu
+   SetIndexLabel(0, name);                                  // chart tooltips and "Data" window
    IndicatorDigits(1);
 
    // drawing options and styles
@@ -99,8 +97,8 @@ int onDeinitRecompile() {
  * @return int - error status
  */
 int onTick() {
-   // a not initialized buffer can happen on terminal start under specific circumstances
-   if (!ArraySize(bufferVola)) return(log("onTick(1)  size(bufferVola) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
+   // on the first tick after terminal start buffers may not yet be initialized (spurious issue)
+   if (!ArraySize(bufferVola)) return(logInfo("onTick(1)  size(bufferVola) = 0", SetLastError(ERS_TERMINAL_NOT_YET_READY)));
 
    // reset all buffers and delete garbage before doing a full recalculation
    if (!UnchangedBars) {
@@ -116,7 +114,7 @@ int onTick() {
 
    // (1) calculate start bar
    int startBar = Min(ChangedBars-1, Bars-volaPeriods-1);
-   if (startBar < 0) return(catch("onTick(2)", ERR_HISTORY_INSUFFICIENT));
+   if (startBar < 0) return(logInfo("onTick(2)  Tick="+ Tick, ERR_HISTORY_INSUFFICIENT));
 
 
    // (2) recalculate invalid indicator values
@@ -170,7 +168,7 @@ double Volatility(int bar) {
 
 /**
  * Workaround for various terminal bugs when setting indicator options. Usually options are set in init(). However after
- * recompilation options must be set in start() to not get ignored.
+ * recompilation options must be set in start() to not be ignored.
  */
 void SetIndicatorOptions() {
    IndicatorBuffers(indicator_buffers);
@@ -183,7 +181,7 @@ void SetIndicatorOptions() {
  * @return bool - success status
  */
 bool StoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.StoreInt   (name +".input.Vola.Periods", Vola.Periods);
    Chart.StoreString(name +".input.Vola.Type",    Vola.Type   );
    return(!catch("StoreInputParameters(1)"));
@@ -196,7 +194,7 @@ bool StoreInputParameters() {
  * @return bool - success status
  */
 bool RestoreInputParameters() {
-   string name = __NAME();
+   string name = ProgramName();
    Chart.RestoreInt   (name +".input.Vola.Periods", Vola.Periods);
    Chart.RestoreString(name +".input.Vola.Type",    Vola.Type   );
    return(!catch("RestoreInputParameters(1)"));

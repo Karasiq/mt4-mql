@@ -1,37 +1,24 @@
 /**
- * Displays additional market and trading infos in the chart.
+ * Displays additional market and account infos in the chart.
  *
+ *  - Symbol (in builds <= 509), price and spread.
+ *  - The calculated position size according to the configured risk profile.
+ *  - Total open position and risk according to the configured risk profile.
+ *  - P/L of open positions and/or trade history supporting two different modes:
+ *     • internal: positions and/or history from the current account,
+ *                 P/L as provided by the current account,
+ *                 order execution notifications
+ *     • external: positions and/or history from an external account (e.g. synthetic instruments),
+ *                 P/L as provided by the external source,
+ *                 limit monitoring and notifications
+ *  - The current account stopout level.
+ *  - A warning when the account's open order limit is approached.
  *
- *  • on builds <= 509: the current symbol
- *  • the current price with configurable type
- *  • the current spread
- *  • the trade unit size according to the configured risk or leverage profile (default: 10% risk based on weekly volatility)
- *  • open total position, current total risk according to the configured risk profile, current total leverage
- *  • the current Stopout price level
- *  • a warning in different colors when the current account's open order limit comes closer
- *  • custom user-defined open positions and/or history periods, @see CustomPositions.ReadConfig() for the format
- *
- *    (1) internal positions: - positions hold in the current account
- *                            - position data and P/L as provided by the current account
- *                            - order event notification (onPositionOpen, onPositionClosed, onOrderFailed)
- *
- *    (2) external positions: - positions hold in another account not capable to provide P/L (e.g. a SimpleTrader account)
- *                            - position data as provided by the external source
- *                            - P/L is calculated using prices from the current account
- *                            - additionally the external account identifier is displayed
- *
- *    (2) remote positions:   - positions hold in another account capable to provide P/L (e.g. for synthetic instruments)
- *                            - position data and P/L as provided by the external source
- *                            - order limit monitoring and notification of the remote account
- *                            - additionally the remote account identifier is displayed
- *
- * TODO:
- *   - Order tracking must monitor all symbols, not just the current one.
- *   - Order tracking must delegate signaling to the Expander. The Expander must filter multiple calls for the same event.
+ * All custom aspects are configurable via the framework configuration.
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[] = {INIT_TIMEZONE};
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -47,12 +34,9 @@ extern string Signal.SMS.Receiver  = "on | off | auto* | {phone-number}";
 
 #include <core/indicator.mqh>
 #include <stdfunctions.mqh>
-#include <functions/@ATR.mqh>
-#include <functions/Configure.Signal.Mail.mqh>
-#include <functions/Configure.Signal.SMS.mqh>
-#include <functions/Configure.Signal.Sound.mqh>
-#include <functions/iBarShiftNext.mqh>
-#include <functions/iBarShiftPrevious.mqh>
+#include <functions/ConfigureSignalMail.mqh>
+#include <functions/ConfigureSignalSMS.mqh>
+#include <functions/ConfigureSignalSound.mqh>
 #include <functions/InitializeByteBuffer.mqh>
 #include <functions/JoinStrings.mqh>
 #include <MT4iQuickChannel.mqh>
@@ -67,25 +51,21 @@ extern string Signal.SMS.Receiver  = "on | off | auto* | {phone-number}";
 int displayedPrice = PRICE_MEDIAN;                                // price type: Bid | Ask | Median (default)
 
 
-// money management
-bool   mm.isDone;                                                 // Flag
-double mm.lotValue;                                               // Value eines Lots in Account-Currency
-double mm.unleveragedLots;                                        // mögliche Lotsize bei Hebel von 1:1
-double mm.externalAssets;                                         // extern gehaltene zusätzlich zu berücksichtigende Assets
-
-double mm.ATRwAbs;                                                // wöchentliche ATR: absoluter Wert
-double mm.ATRwPct;                                                // wöchentliche ATR: prozentualer Wert
-
-double mm.vola = 10;                                              // Volatilität einer Unit in Prozent Equity je Woche (hardcoded default value if nothing is configured)
-double mm.leverage;                                               // Hebel für diese Volatilität
-double mm.unitSize;                                               // exakter Wert der resultierenden UnitSize
-double mm.unitSize.normalized;                                    // auf MODE_LOTSTEP normalisierter Wert der UnitSize
-
-double mm.equity;                                                 // als Equity zu verwendender Betrag
+// position size calculation
+bool   mm.done;                                                   // processing flag
+double mm.lotValue;                                               // value of 1 lot in account currency
+double mm.unleveragedLots;                                        // unleveraged position size
+double mm.risk;                                                   // configured position risk in %
+double mm.stopDistance;                                           // configured stop distance in pip
+double mm.positionSize;                                           // calculated position size according to risk and stop distance
+double mm.normPositionSize;                                       // mm.positionSize normalized to MODE_LOTSTEP
+double mm.positionSizeLeverage;                                   // leverage of the calculated position size
+double mm.externalAssets;                                         // additional assets not hold in the broker's account
+double mm.equity;                                                 // total applied equity value
                                                                   //  - enthält externe Assets                                                       !!! doppelte Spreads und      !!!
                                                                   //  - enthält offene Gewinne/Verluste gehedgter Positionen (gehedgt = realisiert)  !!! Commissions herausrechnen !!!
                                                                   //  - enthält offene Verluste ungehedgter Positionen
-                                                                  //  - enthält jedoch nicht offene Gewinne ungehedgter Positionen (ungehedgt = unrealisiert)
+                                                                  //  - enthält jedoch nicht offene Gewinne ungehedgter Positionen (unrealisiert)
 // configuration of custom positions
 #define POSITION_CONFIG_TERM.size      40                         // in Bytes
 #define POSITION_CONFIG_TERM.doubleSize 5                         // in Doubles
@@ -140,45 +120,16 @@ string  typeDescriptions[] = {"", "Long:", "Short:", "Hedge:", "History:"};
 #define I_FULL_PROFIT_ABS               7
 #define I_FULL_PROFIT_PCT               8
 
-
-// externe Positionen: open
-int      external.open.ticket    [];
-int      external.open.type      [];
-double   external.open.lots      [];
-datetime external.open.openTime  [];
-double   external.open.openPrice [];
-double   external.open.takeProfit[];
-double   external.open.stopLoss  [];
-double   external.open.commission[];
-double   external.open.swap      [];
-double   external.open.profit    [];
-bool     external.open.lots.checked;
-double   external.open.longPosition, external.open.shortPosition;
-
-// externe Positionen: closed
-int      external.closed.ticket    [];
-int      external.closed.type      [];
-double   external.closed.lots      [];
-datetime external.closed.openTime  [];
-double   external.closed.openPrice [];
-datetime external.closed.closeTime [];
-double   external.closed.closePrice[];
-double   external.closed.takeProfit[];
-double   external.closed.stopLoss  [];
-double   external.closed.commission[];
-double   external.closed.swap      [];
-double   external.closed.profit    [];
-
 // Cache-Variablen für LFX-Orders. Ihre Größe entspricht der Größe von lfxOrders[].
 // Dienen der Beschleunigung, um nicht ständig die LFX_ORDER-Getter aufrufen zu müssen.
-int      lfxOrders.iCache[][1];                                      // = {Ticket}
-bool     lfxOrders.bCache[][3];                                      // = {IsPendingOrder, IsOpenPosition , IsPendingPosition}
-double   lfxOrders.dCache[][7];                                      // = {OpenEquity    , Profit         , LastProfit       , TP-Amount , TP-Percent, SL-Amount, SL-Percent}
-int      lfxOrders.pendingOrders;                                    // Anzahl der PendingOrders (mit Entry-Limit)  : lo.IsPendingOrder()    = 1
-int      lfxOrders.openPositions;                                    // Anzahl der offenen Positionen               : lo.IsOpenPosition()    = 1
-int      lfxOrders.pendingPositions;                                 // Anzahl der offenen Positionen mit Exit-Limit: lo.IsPendingPosition() = 1
+int      lfxOrders.iCache[][1];                                   // = {Ticket}
+bool     lfxOrders.bCache[][3];                                   // = {IsPendingOrder, IsOpenPosition , IsPendingPosition}
+double   lfxOrders.dCache[][7];                                   // = {OpenEquity    , Profit         , LastProfit       , TP-Amount , TP-Percent, SL-Amount, SL-Percent}
+int      lfxOrders.pendingOrders;                                 // Anzahl der PendingOrders (mit Entry-Limit)  : lo.IsPendingOrder()    = 1
+int      lfxOrders.openPositions;                                 // Anzahl der offenen Positionen               : lo.IsOpenPosition()    = 1
+int      lfxOrders.pendingPositions;                              // Anzahl der offenen Positionen mit Exit-Limit: lo.IsPendingPosition() = 1
 
-#define IC.ticket                   0                                // Arrayindizes für Cache-Arrays
+#define IC.ticket                   0                             // Arrayindizes für Cache-Arrays
 
 #define BC.isPendingOrder           0
 #define BC.isOpenPosition           1
@@ -186,7 +137,7 @@ int      lfxOrders.pendingPositions;                                 // Anzahl d
 
 #define DC.openEquity               0
 #define DC.profit                   1
-#define DC.lastProfit               2                                // der letzte vorherige Profit-Wert, um PL-Aktionen nur bei Änderungen durchführen zu können
+#define DC.lastProfit               2                             // der letzte vorherige Profit-Wert, um PL-Aktionen nur bei Änderungen durchführen zu können
 #define DC.takeProfitAmount         3
 #define DC.takeProfitPercent        4
 #define DC.stopLossAmount           5
@@ -195,7 +146,6 @@ int      lfxOrders.pendingPositions;                                 // Anzahl d
 
 // Textlabel für die einzelnen Anzeigen
 string label.instrument     = "${__NAME__}.Instrument";
-string label.ohlc           = "${__NAME__}.OHLC";
 string label.price          = "${__NAME__}.Price";
 string label.spread         = "${__NAME__}.Spread";
 string label.externalAssets = "${__NAME__}.ExternalAssets";
@@ -209,7 +159,6 @@ string label.stopoutLevel   = "${__NAME__}.StopoutLevel";
 // Font-Settings der CustomPositions-Anzeige
 string positions.fontName          = "MS Sans Serif";
 int    positions.fontSize          = 8;
-
 color  positions.fontColor.intern  = Blue;
 color  positions.fontColor.extern  = Red;
 color  positions.fontColor.remote  = Blue;
@@ -247,17 +196,17 @@ bool   signal.sms;
 string signal.sms.receiver = "";
 
 // Order-Events
-int    orders.knownOrders.ticket[];                                  // vom letzten Aufruf bekannte offene Orders
+int    orders.knownOrders.ticket[];                               // vom letzten Aufruf bekannte offene Orders
 int    orders.knownOrders.type  [];
 
 // Close-Typen für automatisch geschlossene Positionen
-#define CLOSE_TYPE_TP               1                                // TakeProfit
-#define CLOSE_TYPE_SL               2                                // StopLoss
-#define CLOSE_TYPE_SO               3                                // StopOut (Margin-Call)
+#define CLOSE_TYPE_TP               1                             // TakeProfit
+#define CLOSE_TYPE_SL               2                             // StopLoss
+#define CLOSE_TYPE_SO               3                             // StopOut (Margin-Call)
 
 
-#include <app/chartinfos/1-init.mqh>
-#include <app/chartinfos/2-deinit.mqh>
+#include <apps/chartinfos/init.mqh>
+#include <apps/chartinfos/deinit.mqh>
 
 
 /**
@@ -266,28 +215,27 @@ int    orders.knownOrders.type  [];
  * @return int - Fehlerstatus
  */
 int onTick() {
-   mm.isDone          = false;
+   mm.done            = false;
    positions.analyzed = false;
 
    HandleCommands();                                                                               // ChartCommands verarbeiten
 
-   if (!UpdatePrice())                     if (CheckLastError("onTick(1)"))  return(last_error);   // aktualisiert die Kursanzeige oben rechts
-   if (!UpdateOHLC())                      if (CheckLastError("onTick(2)"))  return(last_error);   // aktualisiert die OHLC-Anzeige oben links           // TODO: unvollständig
+   if (!UpdatePrice())                     if (CheckLastError("onTick(1)")) return(last_error);    // aktualisiert die Kursanzeige oben rechts
 
-   if (mode.remote.trading) {
-      if (!QC.HandleLfxTerminalMessages()) if (CheckLastError("onTick(3)"))  return(last_error);   // bei einem LFX-Terminal eingehende QuickChannel-Messages verarbeiten
-      if (!UpdatePositions())              if (CheckLastError("onTick(4)"))  return(last_error);   // aktualisiert die Positionsanzeigen unten rechts (gesamt) und links (detailliert)
+   if (mode.extern) {
+      if (!QC.HandleLfxTerminalMessages()) if (CheckLastError("onTick(2)")) return(last_error);    // bei einem LFX-Terminal eingehende QuickChannel-Messages verarbeiten
+      if (!UpdatePositions())              if (CheckLastError("onTick(3)")) return(last_error);    // aktualisiert die Positionsanzeigen unten rechts (gesamt) und links (detailliert)
    }
    else {
-      if (!QC.HandleTradeCommands())       if (CheckLastError("onTick(5)"))  return(last_error);   // bei einem Trade-Terminal eingehende QuickChannel-Messages verarbeiten
-      if (!UpdateSpread())                 if (CheckLastError("onTick(6)"))  return(last_error);
-      if (!UpdateUnitSize())               if (CheckLastError("onTick(7)"))  return(last_error);   // akualisiert die UnitSize-Anzeige unten rechts
-      if (!UpdatePositions())              if (CheckLastError("onTick(8)"))  return(last_error);   // aktualisiert die Positionsanzeigen unten rechts (gesamt) und unten links (detailliert)
-      if (!UpdateStopoutLevel())           if (CheckLastError("onTick(9)"))  return(last_error);   // aktualisiert die Markierung des Stopout-Levels im Chart
-      if (!UpdateOrderCounter())           if (CheckLastError("onTick(10)")) return(last_error);   // aktualisiert die Anzeige der Anzahl der offenen Orders
+      if (!QC.HandleTradeCommands())       if (CheckLastError("onTick(4)")) return(last_error);    // bei einem Trade-Terminal eingehende QuickChannel-Messages verarbeiten
+      if (!UpdateSpread())                 if (CheckLastError("onTick(5)")) return(last_error);
+      if (!UpdatePositionSize())           if (CheckLastError("onTick(6)")) return(last_error);    // akualisiert die UnitSize-Anzeige unten rechts
+      if (!UpdatePositions())              if (CheckLastError("onTick(7)")) return(last_error);    // aktualisiert die Positionsanzeigen unten rechts (gesamt) und unten links (detailliert)
+      if (!UpdateStopoutLevel())           if (CheckLastError("onTick(8)")) return(last_error);    // aktualisiert die Markierung des Stopout-Levels im Chart
+      if (!UpdateOrderCounter())           if (CheckLastError("onTick(9)")) return(last_error);    // aktualisiert die Anzeige der Anzahl der offenen Orders
 
       // ggf. Orders überwachen
-      if (mode.intern.trading && track.orders) {
+      if (mode.intern && track.orders) {
          int failedOrders      []; ArrayResize(failedOrders,    0);
          int openedPositions   []; ArrayResize(openedPositions, 0);
          int closedPositions[][2]; ArrayResize(closedPositions, 0);     // { Ticket, CloseType=[CLOSE_TYPE_TP | CLOSE_TYPE_SL | CLOSE_TYPE_SO] }
@@ -335,7 +283,7 @@ bool CheckLastError(string location) {
  */
 bool onCommand(string commands[]) {
    int size = ArraySize(commands);
-   if (!size) return(!warn("onCommand(1)  empty parameter commands = {}"));
+   if (!size) return(!logWarn("onCommand(1)  empty parameter commands: {}"));
 
    for (int i=0; i < size; i++) {
       if (commands[i] == "cmd=EditAccountConfig") {
@@ -372,16 +320,11 @@ bool onCommand(string commands[]) {
          string key = StrRightFrom(commands[i], ":");
          if (!InitTradeAccount(key))  return(false);
          if (!UpdateAccountDisplay()) return(false);
-         if (mode.extern.notrading) {
-            external.open.lots.checked = false;
-            if (ReadExternalPositions(tradeAccount.company, tradeAccount.alias) == -1)
-               return(false);
-         }
          ArrayResize(positions.config,          0);
          ArrayResize(positions.config.comments, 0);
          continue;
       }
-      warn("onCommand(2)  unknown command \""+ commands[i] +"\"");
+      logWarn("onCommand(2)  unknown command: \""+ commands[i] +"\"");
    }
    return(!catch("onCommand(3)"));
 }
@@ -447,9 +390,8 @@ int ShowOpenOrders() {
    double   lots, units, openPrice, takeProfit, stopLoss;
    string   comment, label1, label2, label3, sTP, sSL, types[]={"buy", "sell", "buy limit", "sell limit", "buy stop", "sell stop"};
 
-
-   // (1) mode.intern.trading
-   if (mode.intern.trading) {
+   // mode.intern
+   if (mode.intern) {
       orders = OrdersTotal();
 
       for (int i=0, n; i < orders; i++) {
@@ -524,27 +466,42 @@ int ShowOpenOrders() {
       return(n);
    }
 
+   // mode.extern
+   orders = ArrayRange(lfxOrders, 0);
 
-   // (2) mode.extern.notrading
-   if (mode.extern.notrading) {
-      orders = ArraySize(external.open.ticket);
+   for (i=0, n=0; i < orders; i++) {
+      if (!lfxOrders.bCache[i][BC.isPendingOrder]) /*&&*/ if (!lfxOrders.bCache[i][BC.isOpenPosition])
+         continue;
 
-      for (i=0; i < orders; i++) {
-         // Daten auslesen
-         ticket     =                 external.open.ticket    [i];
-         type       =                 external.open.type      [i];
-         lots       =                 external.open.lots      [i];
-         openTime   = FxtToServerTime(external.open.openTime  [i]);
-         openPrice  =                 external.open.openPrice [i];
-         takeProfit =                 external.open.takeProfit[i];
-         stopLoss   =                 external.open.stopLoss  [i];
+      // Daten auslesen
+      ticket     = lfxOrders.iCache[i][IC.ticket];
+      type       =                     los.Type           (lfxOrders, i);
+      units      =                     los.Units          (lfxOrders, i);
+      openTime   = FxtToServerTime(Abs(los.OpenTime       (lfxOrders, i)));
+      openPrice  =                     los.OpenPrice      (lfxOrders, i);
+      takeProfit =                     los.TakeProfitPrice(lfxOrders, i);
+      stopLoss   =                     los.StopLossPrice  (lfxOrders, i);
+      comment    =                     los.Comment        (lfxOrders, i);
 
-         // Hauptlabel erstellen
-         label1 = StringConcatenate("#", ticket, " ", types[type], " ", DoubleToStr(lots, 2), " at ", NumberToStr(openPrice, SubPipPriceFormat));
+      if (type > OP_SELL) {
+         // Pending-Order
+         label1 = StringConcatenate("#", ticket, " ", types[type], " ", DoubleToStr(units, 1), " at ", NumberToStr(openPrice, PriceFormat));
 
-         // TakeProfit anzeigen
+         // Order anzeigen
+         if (ObjectFind(label1) == 0)
+            ObjectDelete(label1);
+         if (ObjectCreate(label1, OBJ_ARROW, 0, TimeServer(), openPrice)) {
+            ObjectSet(label1, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN);
+            ObjectSet(label1, OBJPROP_COLOR,     CLR_PENDING_OPEN);
+         }
+      }
+      else {
+         // offene Position
+         label1 = StringConcatenate("#", ticket, " ", types[type], " ", DoubleToStr(units, 1), " at ", NumberToStr(openPrice, PriceFormat));
+
+         // TakeProfit anzeigen                                   // TODO: !!! TP fixen, wenn tpValue oder tpPercent angegeben sind
          if (takeProfit != NULL) {
-            sTP    = StringConcatenate("TP: ", NumberToStr(takeProfit, SubPipPriceFormat));
+            sTP    = StringConcatenate("TP: ", NumberToStr(takeProfit, PriceFormat));
             label2 = StringConcatenate(label1, ",  ", sTP);
             if (ObjectFind(label2) == 0)
                ObjectDelete(label2);
@@ -555,9 +512,9 @@ int ShowOpenOrders() {
          }
          else sTP = "";
 
-         // StopLoss anzeigen
+         // StopLoss anzeigen                                     // TODO: !!! SL fixen, wenn slValue oder slPercent angegeben sind
          if (stopLoss != NULL) {
-            sSL    = StringConcatenate("SL: ", NumberToStr(stopLoss, SubPipPriceFormat));
+            sSL    = StringConcatenate("SL: ", NumberToStr(stopLoss, PriceFormat));
             label3 = StringConcatenate(label1, ",  ", sSL);
             if (ObjectFind(label3) == 0)
                ObjectDelete(label3);
@@ -574,90 +531,14 @@ int ShowOpenOrders() {
          if (ObjectCreate(label1, OBJ_ARROW, 0, openTime, openPrice)) {
             ObjectSet(label1, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN);
             ObjectSet(label1, OBJPROP_COLOR,     colors[type]    );
-            ObjectSetText(label1, StringConcatenate(sTP, "   ", sSL));
+            if (StrStartsWith(comment, "#")) comment = StringConcatenate(lfxCurrency, ".", StrToInteger(StrSubstr(comment, 1)));
+            else                             comment = "";
+            ObjectSetText(label1, StrTrim(StringConcatenate(comment, "   ", sTP, "   ", sSL)));
          }
       }
-      return(orders);
+      n++;
    }
-
-
-   // (3) mode.remote.trading
-   if (mode.remote.trading) {
-      orders = ArrayRange(lfxOrders, 0);
-
-      for (i=0, n=0; i < orders; i++) {
-         if (!lfxOrders.bCache[i][BC.isPendingOrder]) /*&&*/ if (!lfxOrders.bCache[i][BC.isOpenPosition])
-            continue;
-
-         // Daten auslesen
-         ticket     = lfxOrders.iCache[i][IC.ticket];
-         type       =                     los.Type           (lfxOrders, i);
-         units      =                     los.Units          (lfxOrders, i);
-         openTime   = FxtToServerTime(Abs(los.OpenTime       (lfxOrders, i)));
-         openPrice  =                     los.OpenPrice      (lfxOrders, i);
-         takeProfit =                     los.TakeProfitPrice(lfxOrders, i);
-         stopLoss   =                     los.StopLossPrice  (lfxOrders, i);
-         comment    =                     los.Comment        (lfxOrders, i);
-
-         if (type > OP_SELL) {
-            // Pending-Order
-            label1 = StringConcatenate("#", ticket, " ", types[type], " ", DoubleToStr(units, 1), " at ", NumberToStr(openPrice, PriceFormat));
-
-            // Order anzeigen
-            if (ObjectFind(label1) == 0)
-               ObjectDelete(label1);
-            if (ObjectCreate(label1, OBJ_ARROW, 0, TimeServer(), openPrice)) {
-               ObjectSet(label1, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN);
-               ObjectSet(label1, OBJPROP_COLOR,     CLR_PENDING_OPEN);
-            }
-         }
-         else {
-            // offene Position
-            label1 = StringConcatenate("#", ticket, " ", types[type], " ", DoubleToStr(units, 1), " at ", NumberToStr(openPrice, PriceFormat));
-
-            // TakeProfit anzeigen                                   // TODO: !!! TP fixen, wenn tpValue oder tpPercent angegeben sind
-            if (takeProfit != NULL) {
-               sTP    = StringConcatenate("TP: ", NumberToStr(takeProfit, PriceFormat));
-               label2 = StringConcatenate(label1, ",  ", sTP);
-               if (ObjectFind(label2) == 0)
-                  ObjectDelete(label2);
-               if (ObjectCreate(label2, OBJ_ARROW, 0, TimeServer(), takeProfit)) {
-                  ObjectSet(label2, OBJPROP_ARROWCODE, SYMBOL_ORDERCLOSE  );
-                  ObjectSet(label2, OBJPROP_COLOR,     CLR_OPEN_TAKEPROFIT);
-               }
-            }
-            else sTP = "";
-
-            // StopLoss anzeigen                                     // TODO: !!! SL fixen, wenn slValue oder slPercent angegeben sind
-            if (stopLoss != NULL) {
-               sSL    = StringConcatenate("SL: ", NumberToStr(stopLoss, PriceFormat));
-               label3 = StringConcatenate(label1, ",  ", sSL);
-               if (ObjectFind(label3) == 0)
-                  ObjectDelete(label3);
-               if (ObjectCreate(label3, OBJ_ARROW, 0, TimeServer(), stopLoss)) {
-                  ObjectSet(label3, OBJPROP_ARROWCODE, SYMBOL_ORDERCLOSE);
-                  ObjectSet(label3, OBJPROP_COLOR,     CLR_OPEN_STOPLOSS);
-               }
-            }
-            else sSL = "";
-
-            // Order anzeigen
-            if (ObjectFind(label1) == 0)
-               ObjectDelete(label1);
-            if (ObjectCreate(label1, OBJ_ARROW, 0, openTime, openPrice)) {
-               ObjectSet(label1, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN);
-               ObjectSet(label1, OBJPROP_COLOR,     colors[type]    );
-               if (StrStartsWith(comment, "#")) comment = StringConcatenate(lfxCurrency, ".", StrToInteger(StrSubstr(comment, 1)));
-               else                             comment = "";
-               ObjectSetText(label1, StrTrim(StringConcatenate(comment, "   ", sTP, "   ", sSL)));
-            }
-         }
-         n++;
-      }
-      return(n);
-   }
-
-   return(_EMPTY(catch("ShowOpenOrders(1)  unreachable code reached", ERR_RUNTIME_ERROR)));
+   return(n);
 }
 
 
@@ -668,7 +549,7 @@ int ShowOpenOrders() {
  */
 bool GetOpenOrderDisplayStatus() {
    // TODO: Status statt im Chart im Fenster lesen/schreiben
-   string label = __NAME() +".OpenOrderDisplay.status";
+   string label = ProgramName() +".OpenOrderDisplay.status";
    if (ObjectFind(label) != -1)
       return(StrToInteger(ObjectDescription(label)) != 0);
    return(false);
@@ -686,7 +567,7 @@ bool SetOpenOrderDisplayStatus(bool status) {
    status = status!=0;
 
    // TODO: Status statt im Chart im Fenster lesen/schreiben
-   string label = __NAME() +".OpenOrderDisplay.status";
+   string label = ProgramName() +".OpenOrderDisplay.status";
    if (ObjectFind(label) == -1)
       ObjectCreate(label, OBJ_LABEL, 0, 0, 0);
 
@@ -756,7 +637,7 @@ bool ToggleTradeHistory() {
  */
 bool GetTradeHistoryDisplayStatus() {
    // TODO: Status statt im Chart im Fenster lesen/schreiben
-   string label = __NAME() +".TradeHistoryDisplay.status";
+   string label = ProgramName() +".TradeHistoryDisplay.status";
    if (ObjectFind(label) != -1)
       return(StrToInteger(ObjectDescription(label)) != 0);
    return(false);
@@ -774,7 +655,7 @@ bool SetTradeHistoryDisplayStatus(bool status) {
    status = status!=0;
 
    // TODO: Status statt im Chart im Fenster lesen/schreiben
-   string label = __NAME() +".TradeHistoryDisplay.status";
+   string label = ProgramName() +".TradeHistoryDisplay.status";
    if (ObjectFind(label) == -1)
       ObjectCreate(label, OBJ_LABEL, 0, 0, 0);
 
@@ -796,17 +677,15 @@ int ShowTradeHistory() {
    double   lots, units, openPrice, closePrice, openEquity, profit;
    string   sOpenPrice, sClosePrice, comment, text, openLabel, lineLabel, closeLabel, sTypes[]={"buy", "sell"};
 
-
-   // (1) Anzeigekonfiguration auslesen
-   string file    = GetAccountConfigPath(tradeAccount.company, tradeAccount.alias);
+   // Anzeigekonfiguration auslesen
+   string file    = GetAccountConfigPath(tradeAccount.company, tradeAccount.number); if (!StringLen(file)) return(EMPTY);
    string section = "Chart";
    string key     = "TradeHistory.ConnectTrades";
    bool drawConnectors = GetIniBool(file, section, key, GetConfigBool(section, key, true));  // Account- überschreibt Terminal-Konfiguration (default = true)
 
-
-   // (2) mode.intern.trading
-   if (mode.intern.trading) {
-      // (2.1) Sortierschlüssel aller geschlossenen Positionen auslesen und nach {CloseTime, OpenTime, Ticket} sortieren
+   // mode.intern
+   if (mode.intern) {
+      // Sortierschlüssel aller geschlossenen Positionen auslesen und nach {CloseTime, OpenTime, Ticket} sortieren
       orders = OrdersHistoryTotal();
       int sortKeys[][3];                                                // {CloseTime, OpenTime, Ticket}
       ArrayResize(sortKeys, orders);
@@ -828,7 +707,7 @@ int ShowTradeHistory() {
       ArrayResize(sortKeys, orders);
       SortClosedTickets(sortKeys);
 
-      // (2.2) Tickets sortiert einlesen
+      // Tickets sortiert einlesen
       int      tickets    []; ArrayResize(tickets    , 0);
       int      types      []; ArrayResize(types      , 0);
       double   lotSizes   []; ArrayResize(lotSizes   , 0);
@@ -857,7 +736,7 @@ int ShowTradeHistory() {
          ArrayPushString(comments   , OrderComment()   );
       }
 
-      // (2.3) Hedges korrigieren: alle Daten dem ersten Ticket zuordnen und hedgendes Ticket verwerfen
+      // Hedges korrigieren: alle Daten dem ersten Ticket zuordnen und hedgendes Ticket verwerfen
       for (i=0; i < orders; i++) {
          if (tickets[i] && EQ(lotSizes[i], 0)) {                     // lotSize = 0: Hedge-Position
 
@@ -890,7 +769,7 @@ int ShowTradeHistory() {
          }
       }
 
-      // (2.4) Orders anzeigen
+      // Orders anzeigen
       for (i=0; i < orders; i++) {
          if (!tickets[i])                                            // verworfene Hedges überspringen
             continue;
@@ -942,116 +821,63 @@ int ShowTradeHistory() {
    }
 
 
-   // (3) mode.extern.notrading
-   if (mode.extern.notrading) {
-      orders = ArraySize(external.closed.ticket);
+   // mode.extern
+   orders = ArrayRange(lfxOrders, 0);
 
-      for (i=0; i < orders; i++) {
-         // Daten auslesen
-         ticket     =                 external.closed.ticket    [i];
-         type       =                 external.closed.type      [i];
-         lots       =                 external.closed.lots      [i];
-         openTime   = FxtToServerTime(external.closed.openTime  [i]);
-         openPrice  =                 external.closed.openPrice [i];  sOpenPrice  = NumberToStr(openPrice, PriceFormat);
-         closeTime  = FxtToServerTime(external.closed.closeTime [i]);
-         closePrice =                 external.closed.closePrice[i];  sClosePrice = NumberToStr(closePrice, PriceFormat);
+   for (i=0, n=0; i < orders; i++) {
+      if (!los.IsClosedPosition(lfxOrders, i)) continue;
 
-         // Open-Marker anzeigen
-         openLabel = StringConcatenate("#", ticket, " ", sTypes[type], " ", DoubleToStr(lots, 2), " at ", sOpenPrice);
-         if (ObjectFind(openLabel) == 0)
-            ObjectDelete(openLabel);
-         if (ObjectCreate(openLabel, OBJ_ARROW, 0, openTime, openPrice)) {
-            ObjectSet    (openLabel, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN  );
-            ObjectSet    (openLabel, OBJPROP_COLOR    , markerColors[type]);
-         }
+      ticket      =                     los.Ticket    (lfxOrders, i);
+      type        =                     los.Type      (lfxOrders, i);
+      units       =                     los.Units     (lfxOrders, i);
+      openTime    =     FxtToServerTime(los.OpenTime  (lfxOrders, i));
+      openPrice   =                     los.OpenPrice (lfxOrders, i);
+      openEquity  =                     los.OpenEquity(lfxOrders, i);
+      closeTime   = FxtToServerTime(Abs(los.CloseTime (lfxOrders, i)));
+      closePrice  =                     los.ClosePrice(lfxOrders, i);
+      profit      =                     los.Profit    (lfxOrders, i);
+      comment     =                     los.Comment   (lfxOrders, i);
 
-         // Trendlinie anzeigen
-         if (drawConnectors) {
-            lineLabel = StringConcatenate("#", ticket, " ", sOpenPrice, " -> ", sClosePrice);
-            if (ObjectFind(lineLabel) == 0)
-               ObjectDelete(lineLabel);
-            if (ObjectCreate(lineLabel, OBJ_TREND, 0, openTime, openPrice, closeTime, closePrice)) {
-               ObjectSet    (lineLabel, OBJPROP_RAY  , false           );
-               ObjectSet    (lineLabel, OBJPROP_STYLE, STYLE_DOT       );
-               ObjectSet    (lineLabel, OBJPROP_COLOR, lineColors[type]);
-               ObjectSet    (lineLabel, OBJPROP_BACK , true            );
-            }
-         }
+      sOpenPrice  = NumberToStr(openPrice,  PriceFormat);
+      sClosePrice = NumberToStr(closePrice, PriceFormat);
 
-         // Close-Marker anzeigen                                    // "#1 buy 0.10 GBPUSD at 1.53024 close[ by tester] at 1.52904"
-         closeLabel = StringConcatenate(openLabel, " close at ", sClosePrice);
-         if (ObjectFind(closeLabel) == 0)
-            ObjectDelete(closeLabel);
-         if (ObjectCreate(closeLabel, OBJ_ARROW, 0, closeTime, closePrice)) {
-            ObjectSet    (closeLabel, OBJPROP_ARROWCODE, SYMBOL_ORDERCLOSE);
-            ObjectSet    (closeLabel, OBJPROP_COLOR    , CLR_CLOSE        );
+      // Open-Marker anzeigen
+      openLabel = StringConcatenate("#", ticket, " ", sTypes[type], " ", DoubleToStr(units, 1), " at ", sOpenPrice);
+      if (ObjectFind(openLabel) == 0)
+         ObjectDelete(openLabel);
+      if (ObjectCreate(openLabel, OBJ_ARROW, 0, openTime, openPrice)) {
+         ObjectSet    (openLabel, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN  );
+         ObjectSet    (openLabel, OBJPROP_COLOR    , markerColors[type]);
+            if (positions.absoluteProfits || !openEquity) text = ifString(profit > 0, "+", "") + DoubleToStr(profit, 2);
+            else                                          text = ifString(profit > 0, "+", "") + DoubleToStr(profit/openEquity * 100, 2) +"%";
+         ObjectSetText(openLabel, text);
+      }
+
+      // Trendlinie anzeigen
+      if (drawConnectors) {
+         lineLabel = StringConcatenate("#", ticket, " ", sOpenPrice, " -> ", sClosePrice);
+         if (ObjectFind(lineLabel) == 0)
+            ObjectDelete(lineLabel);
+         if (ObjectCreate(lineLabel, OBJ_TREND, 0, openTime, openPrice, closeTime, closePrice)) {
+            ObjectSet    (lineLabel, OBJPROP_RAY  , false           );
+            ObjectSet    (lineLabel, OBJPROP_STYLE, STYLE_DOT       );
+            ObjectSet    (lineLabel, OBJPROP_COLOR, lineColors[type]);
+            ObjectSet    (lineLabel, OBJPROP_BACK , true            );
          }
       }
-      return(orders);
-   }
 
-
-   // (4) mode.remote.trading
-   if (mode.remote.trading) {
-      orders = ArrayRange(lfxOrders, 0);
-
-      for (i=0, n=0; i < orders; i++) {
-         if (!los.IsClosedPosition(lfxOrders, i)) continue;
-
-         ticket      =                     los.Ticket    (lfxOrders, i);
-         type        =                     los.Type      (lfxOrders, i);
-         units       =                     los.Units     (lfxOrders, i);
-         openTime    =     FxtToServerTime(los.OpenTime  (lfxOrders, i));
-         openPrice   =                     los.OpenPrice (lfxOrders, i);
-         openEquity  =                     los.OpenEquity(lfxOrders, i);
-         closeTime   = FxtToServerTime(Abs(los.CloseTime (lfxOrders, i)));
-         closePrice  =                     los.ClosePrice(lfxOrders, i);
-         profit      =                     los.Profit    (lfxOrders, i);
-         comment     =                     los.Comment   (lfxOrders, i);
-
-         sOpenPrice  = NumberToStr(openPrice,  PriceFormat);
-         sClosePrice = NumberToStr(closePrice, PriceFormat);
-
-         // Open-Marker anzeigen
-         openLabel = StringConcatenate("#", ticket, " ", sTypes[type], " ", DoubleToStr(units, 1), " at ", sOpenPrice);
-         if (ObjectFind(openLabel) == 0)
-            ObjectDelete(openLabel);
-         if (ObjectCreate(openLabel, OBJ_ARROW, 0, openTime, openPrice)) {
-            ObjectSet    (openLabel, OBJPROP_ARROWCODE, SYMBOL_ORDEROPEN  );
-            ObjectSet    (openLabel, OBJPROP_COLOR    , markerColors[type]);
-               if (positions.absoluteProfits || !openEquity) text = ifString(profit > 0, "+", "") + DoubleToStr(profit, 2);
-               else                                          text = ifString(profit > 0, "+", "") + DoubleToStr(profit/openEquity * 100, 2) +"%";
-            ObjectSetText(openLabel, text);
-         }
-
-         // Trendlinie anzeigen
-         if (drawConnectors) {
-            lineLabel = StringConcatenate("#", ticket, " ", sOpenPrice, " -> ", sClosePrice);
-            if (ObjectFind(lineLabel) == 0)
-               ObjectDelete(lineLabel);
-            if (ObjectCreate(lineLabel, OBJ_TREND, 0, openTime, openPrice, closeTime, closePrice)) {
-               ObjectSet    (lineLabel, OBJPROP_RAY  , false           );
-               ObjectSet    (lineLabel, OBJPROP_STYLE, STYLE_DOT       );
-               ObjectSet    (lineLabel, OBJPROP_COLOR, lineColors[type]);
-               ObjectSet    (lineLabel, OBJPROP_BACK , true            );
-            }
-         }
-
-         // Close-Marker anzeigen                                    // "#1 buy 0.10 GBPUSD at 1.53024 close[ by tester] at 1.52904"
-         closeLabel = StringConcatenate(openLabel, " close at ", sClosePrice);
-         if (ObjectFind(closeLabel) == 0)
-            ObjectDelete(closeLabel);
-         if (ObjectCreate(closeLabel, OBJ_ARROW, 0, closeTime, closePrice)) {
-            ObjectSet    (closeLabel, OBJPROP_ARROWCODE, SYMBOL_ORDERCLOSE);
-            ObjectSet    (closeLabel, OBJPROP_COLOR    , CLR_CLOSE        );
-            ObjectSetText(closeLabel, text);
-         }
-         n++;
+      // Close-Marker anzeigen                                    // "#1 buy 0.10 GBPUSD at 1.53024 close[ by tester] at 1.52904"
+      closeLabel = StringConcatenate(openLabel, " close at ", sClosePrice);
+      if (ObjectFind(closeLabel) == 0)
+         ObjectDelete(closeLabel);
+      if (ObjectCreate(closeLabel, OBJ_ARROW, 0, closeTime, closePrice)) {
+         ObjectSet    (closeLabel, OBJPROP_ARROWCODE, SYMBOL_ORDERCLOSE);
+         ObjectSet    (closeLabel, OBJPROP_COLOR    , CLR_CLOSE        );
+         ObjectSetText(closeLabel, text);
       }
-      return(n);
+      n++;
    }
-
-   return(_EMPTY(catch("ShowTradeHistory(6)  unreachable code reached", ERR_RUNTIME_ERROR)));
+   return(n);
 }
 
 
@@ -1061,15 +887,10 @@ int ShowTradeHistory() {
  * @return bool - Erfolgsstatus
  */
 bool Positions.ToggleProfits() {
-   // aktuellen Anzeigestatus umschalten
-   positions.absoluteProfits = !positions.absoluteProfits;
+   positions.absoluteProfits = !positions.absoluteProfits;     // aktuellen Anzeigestatus umschalten
 
-   // Positionsanzeige aktualisieren
-   if (!UpdatePositions()) return(false);
-
-
-   // ggf. TradeHistory aktualisieren
-   if (GetTradeHistoryDisplayStatus())
+   if (!UpdatePositions()) return(false);                      // Positionsanzeige aktualisieren
+   if (GetTradeHistoryDisplayStatus())                         // ggf. TradeHistory aktualisieren
       ShowTradeHistory();
 
    return(!catch("Positions.ToggleProfits(1)"));
@@ -1087,20 +908,13 @@ bool ToggleAuM() {
 
    // Status ON
    if (status) {
-      mm.externalAssets = RefreshExternalAssets(tradeAccount.company, ifString(mode.extern.notrading, tradeAccount.alias, tradeAccount.number));
-      string sExternalAsets = " ";
+      mm.externalAssets = GetExternalAssets(tradeAccount.company, tradeAccount.number, /*refresh=*/true);
+      string sExternalAssets = " ";
 
-      if (mode.intern.trading) {
-         sExternalAsets = ifString(!mm.externalAssets, "Balance:  ", "Assets:  ") + DoubleToStr(AccountBalance() + mm.externalAssets, 2) +" "+ AccountCurrency();
-      }
-      else if (mode.extern.notrading) {
-         sExternalAsets = "Assets:  " + ifString(!mm.externalAssets, "n/a", DoubleToStr(mm.externalAssets, 2) +" "+ AccountCurrency());
-      }
-      else /*mode.remote.trading*/{
-         status = false;                                             // not yet implemented
-         PlaySoundEx("Plonk.wav");                                   // Plonk!!!
-      }
-      ObjectSetText(label.externalAssets, sExternalAsets, 9, "Tahoma", SlateGray);
+      if (mode.intern) sExternalAssets = ifString(!mm.externalAssets, "Balance: ", "Assets: ") + DoubleToStr(AccountBalance() + mm.externalAssets, 2) +" "+ AccountCurrency();
+      else { status = false; PlaySoundEx("Plonk.wav"); }             // not yet implemented
+
+      ObjectSetText(label.externalAssets, sExternalAssets, 9, "Tahoma", SlateGray);
    }
 
    // Status OFF
@@ -1109,7 +923,7 @@ bool ToggleAuM() {
    }
 
    int error = GetLastError();
-   if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)  // bei offenem Properties-Dialog oder Object::onDrag()
+   if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)  // on Object::onDrag() or opened "Properties" dialog
       return(!catch("ToggleAuM(1)", error));
 
    // Anzeigestatus im Chart speichern
@@ -1128,7 +942,7 @@ bool ToggleAuM() {
  */
 bool GetAuMDisplayStatus() {
    // TODO: Status statt im Chart im Fenster lesen/schreiben
-   string label = __NAME() +".AuMDisplay.status";
+   string label = ProgramName() +".AuMDisplay.status";
    if (ObjectFind(label) != -1)
       return(StrToInteger(ObjectDescription(label)) != 0);
    return(false);
@@ -1146,7 +960,7 @@ bool SetAuMDisplayStatus(bool status) {
    status = status!=0;
 
    // TODO: Status statt im Chart im Fenster lesen/schreiben
-   string label = __NAME() +".AuMDisplay.status";
+   string label = ProgramName() +".AuMDisplay.status";
    if (ObjectFind(label) == -1)
       ObjectCreate(label, OBJ_LABEL, 0, 0, 0);
 
@@ -1164,9 +978,8 @@ bool SetAuMDisplayStatus(bool status) {
  */
 bool CreateLabels() {
    // Label definieren
-   string programName = __NAME();
+   string programName = ProgramName();
    label.instrument     = StrReplace(label.instrument,     "${__NAME__}", programName);
-   label.ohlc           = StrReplace(label.ohlc,           "${__NAME__}", programName);
    label.price          = StrReplace(label.price,          "${__NAME__}", programName);
    label.spread         = StrReplace(label.spread,         "${__NAME__}", programName);
    label.externalAssets = StrReplace(label.externalAssets, "${__NAME__}", programName);
@@ -1175,7 +988,6 @@ bool CreateLabels() {
    label.orderCounter   = StrReplace(label.orderCounter,   "${__NAME__}", programName);
    label.tradeAccount   = StrReplace(label.tradeAccount,   "${__NAME__}", programName);
    label.stopoutLevel   = StrReplace(label.stopoutLevel,   "${__NAME__}", programName);
-
 
    // Instrument-Label: Anzeige wird sofort (und nur hier) gesetzt
    int build = GetTerminalBuild();
@@ -1186,7 +998,7 @@ bool CreateLabels() {
          ObjectSet    (label.instrument, OBJPROP_CORNER, CORNER_TOP_LEFT);
          ObjectSet    (label.instrument, OBJPROP_XDISTANCE, ifInt(build < 479, 4, 13));   // Builds größer 478 haben oben links einen Pfeil fürs One-Click-Trading,
          ObjectSet    (label.instrument, OBJPROP_YDISTANCE, ifInt(build < 479, 1,  3));   // das Instrument-Label wird dort entsprechend versetzt positioniert.
-         ObjectRegister(label.instrument);
+         RegisterObject(label.instrument);
       }
       else GetLastError();
       string name = GetLongSymbolNameOrAlt(Symbol(), GetSymbolName(Symbol()));
@@ -1194,20 +1006,6 @@ bool CreateLabels() {
       else if (StrEndsWithI(Symbol(), "_avg")) name = StringConcatenate(name, " (Avg)");
       ObjectSetText(label.instrument, name, 9, "Tahoma Fett", Black);
    }
-
-
-   // OHLC-Label
-   if (ObjectFind(label.ohlc) == 0)
-      ObjectDelete(label.ohlc);
-   if (ObjectCreate(label.ohlc, OBJ_LABEL, 0, 0, 0)) {
-      ObjectSet    (label.ohlc, OBJPROP_CORNER, CORNER_TOP_LEFT);
-      ObjectSet    (label.ohlc, OBJPROP_XDISTANCE, 110);
-      ObjectSet    (label.ohlc, OBJPROP_YDISTANCE, 4  );
-      ObjectSetText(label.ohlc, " ", 1);
-      ObjectRegister(label.ohlc);
-   }
-   else GetLastError();
-
 
    // Price-Label
    if (ObjectFind(label.price) == 0)
@@ -1217,10 +1015,9 @@ bool CreateLabels() {
       ObjectSet    (label.price, OBJPROP_XDISTANCE, 14);
       ObjectSet    (label.price, OBJPROP_YDISTANCE, 15);
       ObjectSetText(label.price, " ", 1);
-      ObjectRegister(label.price);
+      RegisterObject(label.price);
    }
    else GetLastError();
-
 
    // Spread-Label
    if (ObjectFind(label.spread) == 0)
@@ -1230,33 +1027,31 @@ bool CreateLabels() {
       ObjectSet    (label.spread, OBJPROP_XDISTANCE, 33);
       ObjectSet    (label.spread, OBJPROP_YDISTANCE, 38);
       ObjectSetText(label.spread, " ", 1);
-      ObjectRegister(label.spread);
+      RegisterObject(label.spread);
    }
    else GetLastError();
-
 
    // OrderCounter-Label
    if (ObjectFind(label.orderCounter) == 0)
       ObjectDelete(label.orderCounter);
    if (ObjectCreate(label.orderCounter, OBJ_LABEL, 0, 0, 0)) {
       ObjectSet    (label.orderCounter, OBJPROP_CORNER, CORNER_BOTTOM_RIGHT);
-      ObjectSet    (label.orderCounter, OBJPROP_XDISTANCE, 380);
+      ObjectSet    (label.orderCounter, OBJPROP_XDISTANCE, 440);
       ObjectSet    (label.orderCounter, OBJPROP_YDISTANCE,   9);
       ObjectSetText(label.orderCounter, " ", 1);
-      ObjectRegister(label.orderCounter);
+      RegisterObject(label.orderCounter);
    }
    else GetLastError();
-
 
    // Assets-under-Management-Label
    if (ObjectFind(label.externalAssets) == 0)
       ObjectDelete(label.externalAssets);
    if (ObjectCreate(label.externalAssets, OBJ_LABEL, 0, 0, 0)) {
       ObjectSet    (label.externalAssets, OBJPROP_CORNER, CORNER_BOTTOM_RIGHT);
-      ObjectSet    (label.externalAssets, OBJPROP_XDISTANCE, 240);
+      ObjectSet    (label.externalAssets, OBJPROP_XDISTANCE, 270);
       ObjectSet    (label.externalAssets, OBJPROP_YDISTANCE,   9);
       ObjectSetText(label.externalAssets, " ", 1);
-      ObjectRegister(label.externalAssets);
+      RegisterObject(label.externalAssets);
    }
    else GetLastError();
 
@@ -1269,7 +1064,7 @@ bool CreateLabels() {
       ObjectSet    (label.position, OBJPROP_XDISTANCE,  9);
       ObjectSet    (label.position, OBJPROP_YDISTANCE, 29);
       ObjectSetText(label.position, " ", 1);
-      ObjectRegister(label.position);
+      RegisterObject(label.position);
    }
    else GetLastError();
 
@@ -1282,7 +1077,7 @@ bool CreateLabels() {
       ObjectSet    (label.unitSize, OBJPROP_XDISTANCE, 9);
       ObjectSet    (label.unitSize, OBJPROP_YDISTANCE, 9);
       ObjectSetText(label.unitSize, " ", 1);
-      ObjectRegister(label.unitSize);
+      RegisterObject(label.unitSize);
    }
    else GetLastError();
 
@@ -1295,7 +1090,7 @@ bool CreateLabels() {
       ObjectSet    (label.tradeAccount, OBJPROP_XDISTANCE, 6);
       ObjectSet    (label.tradeAccount, OBJPROP_YDISTANCE, 4);
       ObjectSetText(label.tradeAccount, " ", 1);
-      ObjectRegister(label.tradeAccount);
+      RegisterObject(label.tradeAccount);
    }
    else GetLastError();
 
@@ -1329,73 +1124,68 @@ bool UpdatePrice() {
    ObjectSetText(label.price, NumberToStr(price, priceFormat), 13, "Microsoft Sans Serif", Black);
 
    int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)       // bei offenem Properties-Dialog oder Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)       // on Object::onDrag() or opened "Properties" dialog
       return(true);
    return(!catch("UpdatePrice(1)", error));
 }
 
 
 /**
- * Aktualisiert die Spreadanzeige.
+ * Update the displayed spread.
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool UpdateSpread() {
-   if (!Bid)                                                                  // Symbol (noch) nicht subscribed (Start, Account- oder Templatewechsel) oder Offline-Chart
-      return(true);
+   if (!Bid) return(true);                                                 // symbol not (yet) subscribed: on start, account/template change, offline chart
 
-   string strSpread = DoubleToStr((Ask - Bid)/Pip, Digits & 1);               // in Tester MarketInfo(MODE_SPREAD) is wrongly implemented
+   string sSpread = DoubleToStr((Ask - Bid)/Pip, Digits & 1);              // don't use MarketInfo(MODE_SPREAD) as in tester it's invalid
 
-   ObjectSetText(label.spread, strSpread, 9, "Tahoma", SlateGray);
+   ObjectSetText(label.spread, sSpread, 9, "Tahoma", SlateGray);
 
    int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                            // bei offenem Properties-Dialog oder Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                         // on Object::onDrag() or opened "Properties" dialog
       return(true);
    return(!catch("UpdateSpread(1)", error));
 }
 
 
 /**
- * Aktualisiert die UnitSize-Anzeige unten rechts.
+ * Update the display of the calculated position size for the configured risk profile (bottom-right).
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
-bool UpdateUnitSize() {
-   if (IsTesting())                                     return(true);         // Anzeige wird im Tester nicht benötigt
-   if (!mm.isDone) /*&&*/ if (!UpdateMoneyManagement()) return(_false(CheckLastError("UpdateUnitSize(1)->UpdateMoneyManagement()")));
-   if (!mm.isDone)                                      return(true);
+bool UpdatePositionSize() {
+   if (IsTesting())                                   return(true);        // skip in tester
+   if (!mm.done) /*&&*/ if (!CalculatePositionSize()) return(_false(CheckLastError("UpdatePositionSize(1)->CalculatePositionSize()")));
+   if (!mm.done)                                      return(true);
 
-   string sUnitSize;
-
-   // Anzeige nur bei internem Account:                    V - Volatilität/Woche               L - Leverage                              Unitsize
-   if (mode.intern.trading) sUnitSize = StringConcatenate("V", DoubleToStr(mm.vola, 1), "%     L", DoubleToStr(mm.leverage, 1), "  =  ", NumberToStr(mm.unitSize.normalized, ", .+"), " lot");
-   else                     sUnitSize = " ";
-
-   // Anzeige aktualisieren (maxLen = 63 chars)
-   ObjectSetText(label.unitSize, sUnitSize, 9, "Tahoma", SlateGray);
+   string sPositionSize = "";         // R - risk / stop distance                                                                  L - leverage                                           position size
+   if (mode.intern && mm.risk && mm.stopDistance) {
+      sPositionSize = StringConcatenate("R ", NumberToStr(mm.risk, ".+"), "%/", DoubleToStr(mm.stopDistance, Digits & 1), "pip     L", DoubleToStr(mm.positionSizeLeverage, 1), "      ", NumberToStr(mm.normPositionSize, ", .+"), " lot");
+   }
+   ObjectSetText(label.unitSize, sPositionSize, 9, "Tahoma", SlateGray);
 
    int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                            // bei offenem Properties-Dialog oder Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                         // on Object::onDrag() or opened "Properties" dialog
       return(true);
-   return(!catch("UpdateUnitSize(1)", error));
+   return(!catch("UpdatePositionSize(2)", error));
 }
 
 
 /**
  * Aktualisiert die Positionsanzeigen unten rechts (Gesamtposition) und unten links (detaillierte Einzelpositionen).
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool UpdatePositions() {
-   if (!positions.analyzed ) /*&&*/ if (!AnalyzePositions()) return(false);
-   if (!mode.remote.trading) /*&&*/ if (!mm.isDone) {
-      if (!UpdateMoneyManagement())                          return(false);
-      if (!mm.isDone)                                        return(true);
+   if (!positions.analyzed) /*&&*/ if (!AnalyzePositions()) return(false);
+   if (mode.intern && !mm.done) {
+      if (!CalculatePositionSize())                         return(false);
+      if (!mm.done)                                         return(true);
    }
 
-
    // (1) Gesamtpositionsanzeige unten rechts
-   string sCurrentVola, sCurrentLeverage, sCurrentPosition;
+   string sCurrentLeverage, sCurrentPosition;
    if      (!isPosition   ) sCurrentPosition = " ";
    else if (!totalPosition) sCurrentPosition = StringConcatenate("Position:   ±", NumberToStr(longPosition, ", .+"), " lot (hedged)");
    else {
@@ -1403,23 +1193,18 @@ bool UpdatePositions() {
       double currentLeverage;
       if (!mm.equity) currentLeverage = MathAbs(totalPosition)/((AccountEquity()-AccountCredit())/mm.lotValue);  // Workaround bei negativer AccountBalance:
       else            currentLeverage = MathAbs(totalPosition)/mm.unleveragedLots;                               // die unrealisierten Gewinne werden mit einbezogen !!!
-      sCurrentLeverage = StringConcatenate("L", DoubleToStr(currentLeverage, 1), "      ");
-
-      // Volatilität/Woche der aktuellen Position = aktueller Leverage * ATRwPct
-      if (mm.ATRwPct != 0)
-         sCurrentVola = StringConcatenate("V", DoubleToStr(mm.ATRwPct * 100 * currentLeverage, 1), "%     ");
-
-      sCurrentPosition = StringConcatenate("Position:   " , sCurrentVola, sCurrentLeverage, NumberToStr(totalPosition, "+, .+"), " lot");
+      sCurrentLeverage = StringConcatenate("L", DoubleToStr(currentLeverage, 1), "    ");
+      sCurrentPosition = StringConcatenate("Position:    " , sCurrentLeverage, NumberToStr(totalPosition, "+, .+"), " lot");
    }
    ObjectSetText(label.position, sCurrentPosition, 9, "Tahoma", SlateGray);
 
    int error = GetLastError();
-   if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)  // bei offenem Properties-Dialog oder Object::onDrag()
+   if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)     // on Object::onDrag() or opened "Properties" dialog
       return(!catch("UpdatePositions(1)", error));
 
 
    // (2) PendingTickets-Marker unten rechts ein-/ausblenden
-   string label = __NAME() +".PendingTickets";
+   string label = ProgramName() +".PendingTickets";
    if (ObjectFind(label) == 0)
       ObjectDelete(label);
    if (isPendings) {
@@ -1427,8 +1212,8 @@ bool UpdatePositions() {
          ObjectSet    (label, OBJPROP_CORNER, CORNER_BOTTOM_RIGHT);
          ObjectSet    (label, OBJPROP_XDISTANCE,                       12);
          ObjectSet    (label, OBJPROP_YDISTANCE, ifInt(isPosition, 48, 30));
-         ObjectSetText(label, "n", 6, "Webdings", Orange);           // Webdings: runder Marker, orange="Notice"
-         ObjectRegister(label);
+         ObjectSetText(label, "n", 6, "Webdings", Orange);              // Webdings: runder Marker, orange="Notice"
+         RegisterObject(label);
       }
    }
 
@@ -1439,28 +1224,28 @@ bool UpdatePositions() {
    if (!ArraySize(col.xShifts) || positions.absoluteProfits!=lastAbsoluteProfits) {
       if (positions.absoluteProfits) {
          // Spalten:         Type: Lots   BE:  BePrice   Profit: Amount Percent   Comment
-         // col.xShifts[] = {20,   66,    142, 167,      233,    265,   352,      413};
+         // col.xShifts[] = {20,   66,    149, 174,      240,    279,   366,      427};
          ArrayResize(col.xShifts, 8);
          col.xShifts[0] =  20;
          col.xShifts[1] =  66;
-         col.xShifts[2] = 142;
-         col.xShifts[3] = 167;
-         col.xShifts[4] = 233;
-         col.xShifts[5] = 265;
-         col.xShifts[6] = 352;
-         col.xShifts[7] = 413;
+         col.xShifts[2] = 149;
+         col.xShifts[3] = 174;
+         col.xShifts[4] = 240;
+         col.xShifts[5] = 279;
+         col.xShifts[6] = 366;
+         col.xShifts[7] = 427;
       }
       else {
          // Spalten:         Type: Lots   BE:  BePrice   Profit: Percent   Comment
-         // col.xShifts[] = {20,   66,    142, 167,      233,    265,      326};
+         // col.xShifts[] = {20,   66,    149, 174,      240,    279,      340};
          ArrayResize(col.xShifts, 7);
          col.xShifts[0] =  20;
          col.xShifts[1] =  66;
-         col.xShifts[2] = 142;
-         col.xShifts[3] = 167;
-         col.xShifts[4] = 233;
-         col.xShifts[5] = 265;
-         col.xShifts[6] = 326;
+         col.xShifts[2] = 149;
+         col.xShifts[3] = 174;
+         col.xShifts[4] = 240;
+         col.xShifts[5] = 279;
+         col.xShifts[6] = 340;
       }
       cols                = ArraySize(col.xShifts);
       percentCol          = cols - 2;
@@ -1478,8 +1263,8 @@ bool UpdatePositions() {
       }
    }
    int iePositions = ArrayRange(positions.iData, 0), positions;
-   if (mode.remote.trading) positions = lfxOrders.openPositions;
-   else                     positions = iePositions;
+   if (mode.extern) positions = lfxOrders.openPositions;
+   else             positions = iePositions;
 
    // (3.1) zusätzlich benötigte Zeilen hinzufügen
    while (lines < positions) {
@@ -1491,7 +1276,7 @@ bool UpdatePositions() {
             ObjectSet    (label, OBJPROP_XDISTANCE, col.xShifts[col]              );
             ObjectSet    (label, OBJPROP_YDISTANCE, yDist + (lines-1)*(positions.fontSize+8));
             ObjectSetText(label, " ", 1);
-            ObjectRegister(label);
+            RegisterObject(label);
          }
          else GetLastError();
       }
@@ -1514,12 +1299,12 @@ bool UpdatePositions() {
 
 
    // (4.1) Anzeige interne/externe Positionsdaten
-   if (!mode.remote.trading) {
+   if (!mode.extern) {
       for (int i=iePositions-1; i >= 0; i--) {
          line++;
          if      (positions.iData[i][I_CONFIG_TYPE  ] == CONFIG_VIRTUAL  ) fontColor = positions.fontColor.virtual;
          else if (positions.iData[i][I_POSITION_TYPE] == POSITION_HISTORY) fontColor = positions.fontColor.history;
-         else if (mode.intern.trading)                                     fontColor = positions.fontColor.intern;
+         else if (mode.intern)                                             fontColor = positions.fontColor.intern;
          else                                                              fontColor = positions.fontColor.extern;
 
          if (!positions.dData[i][I_ADJUSTED_PROFIT])     sAdjustedProfit = "";
@@ -1578,7 +1363,7 @@ bool UpdatePositions() {
    }
 
    // (4.2) Anzeige Remote-Positionsdaten
-   if (mode.remote.trading) {
+   if (mode.extern) {
       fontColor = positions.fontColor.remote;
       for (i=ArrayRange(lfxOrders, 0)-1; i >= 0; i--) {
          if (lfxOrders.bCache[i][BC.isOpenPosition]) {
@@ -1637,7 +1422,7 @@ bool UpdateOrderCounter() {
    ObjectSetText(label.orderCounter, sText, 8, "Tahoma Fett", objectColor);
 
    int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                            // bei offenem Properties-Dialog oder Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                                     // on Object::onDrag() or opened "Properties" dialog
       return(true);
    return(!catch("UpdateOrderCounter(1)", error));
 }
@@ -1649,24 +1434,19 @@ bool UpdateOrderCounter() {
  * @return bool - Erfolgsstatus
  */
 bool UpdateAccountDisplay() {
-   string text;
+   string text = "";
 
-   if (mode.intern.trading) {
+   if (mode.intern) {
       ObjectSetText(label.tradeAccount, " ", 1);
    }
-   if (mode.extern.notrading) {
-      ObjectSetText(label.unitSize, " ", 1);
-      text = tradeAccount.name +"  ("+ tradeAccount.company +")";
-      ObjectSetText(label.tradeAccount, text, 8, "Arial Fett", Red);
-   }
-   if (mode.remote.trading) {
+   else {
       ObjectSetText(label.unitSize, " ", 1);
       text = tradeAccount.name +": "+ tradeAccount.company +", "+ tradeAccount.number +", "+ tradeAccount.currency;
       ObjectSetText(label.tradeAccount, text, 8, "Arial Fett", ifInt(tradeAccount.type==ACCOUNT_TYPE_DEMO, LimeGreen, DarkOrange));
    }
 
    int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                            // bei offenem Properties-Dialog oder Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                                     // on Object::onDrag() or opened "Properties" dialog
       return(true);
    return(!catch("UpdateAccountDisplay(1)", error));
 }
@@ -1681,10 +1461,10 @@ bool UpdateStopoutLevel() {
    if (!positions.analyzed) /*&&*/ if (!AnalyzePositions())
       return(false);
 
-   if (!mode.intern.trading || !totalPosition) {                                       // keine effektive Position im Markt: vorhandene Marker löschen
+   if (!mode.intern || !totalPosition) {                                               // keine effektive Position im Markt: vorhandene Marker löschen
       ObjectDelete(label.stopoutLevel);
       int error = GetLastError();
-      if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)                 // bei offenem Properties-Dialog oder Object::onDrag()
+      if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)                 // on Object::onDrag() or opened "Properties" dialog
          return(!catch("UpdateStopoutLevel(1)", error));
       return(true);
    }
@@ -1714,71 +1494,15 @@ bool UpdateStopoutLevel() {
          if (soMode == MSM_PERCENT) string text = StringConcatenate("Stopout  ", Round(AccountStopoutLevel()), "%  =  ", NumberToStr(soPrice, PriceFormat));
          else                              text = StringConcatenate("Stopout  ", DoubleToStr(soEquity, 2), AccountCurrency(), "  =  ", NumberToStr(soPrice, PriceFormat));
       ObjectSetText(label.stopoutLevel, text);
-      ObjectRegister(label.stopoutLevel);
+      RegisterObject(label.stopoutLevel);
    }
    ObjectSet(label.stopoutLevel, OBJPROP_PRICE1, soPrice);
 
 
    error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                                     // bei offenem Properties-Dialog oder Object::onDrag()
+   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                               // on Object::onDrag() or opened "Properties" dialog
       return(true);
    return(!catch("UpdateStopoutLevel(2)", error));
-}
-
-
-/**
- * Aktualisiert die OHLC-Anzeige.
- *
- * @return bool - Erfolgsstatus
- */
-bool UpdateOHLC() {
-   // TODO: noch nicht zufriedenstellend implementiert
-   return(true);
-
-
-   // (1) Zeit des letzten Ticks holen
-   datetime lastTickTime = MarketInfo(Symbol(), MODE_TIME);
-   if (!lastTickTime) {                                                          // Symbol (noch) nicht subscribed (Start, Account- oder Templatewechsel) oder Offline-Chart
-      if (!SetLastError(GetLastError()))
-         SetLastError(ERR_SYMBOL_NOT_AVAILABLE);
-      return(false);
-   }
-
-
-   // (2) Beginn und Ende der aktuellen Session ermitteln
-   datetime sessionStart = GetSessionStartTime.srv(lastTickTime);                // throws ERR_MARKET_CLOSED
-   if (sessionStart == NaT) {
-      if (__ExecutionContext[EC.mqlError] != ERR_MARKET_CLOSED)                  // am Wochenende die letzte Session verwenden
-         return(false);
-      sessionStart = GetPrevSessionStartTime.srv(lastTickTime);
-   }
-   datetime sessionEnd = sessionStart + 1*DAY;
-
-
-   // (3) Baroffsets von Sessionbeginn und -ende ermitteln
-   int openBar = iBarShiftNext(NULL, NULL, sessionStart);
-      if (openBar == EMPTY_VALUE) return(false);                                 // Fehler
-      if (openBar ==          -1) return(true);                                  // sessionStart ist zu jung für den Chart
-   int closeBar = iBarShiftPrevious(NULL, NULL, sessionEnd);
-      if (closeBar == EMPTY_VALUE) return(false);
-      if (closeBar ==          -1) return(true);                                 // sessionEnd ist zu alt für den Chart
-   if (openBar < closeBar)
-      return(!catch("UpdateOHLC(1)  illegal open/close bar offsets for session from="+ GmtTimeFormat(sessionStart, "%a %d.%m.%Y %H:%M") +" (bar="+ openBar +")  to="+ GmtTimeFormat(sessionEnd, "%a %d.%m.%Y %H:%M") +" (bar="+ closeBar +")", ERR_RUNTIME_ERROR));
-
-
-   // (4) Baroffsets von Session-High und -Low ermitteln
-   int highBar = iHighest(NULL, NULL, MODE_HIGH, openBar-closeBar+1, closeBar);
-   int lowBar  = iLowest (NULL, NULL, MODE_LOW , openBar-closeBar+1, closeBar);
-
-
-   // (5) Anzeige aktualisieren
-   string strOHLC = "O="+ NumberToStr(Open[openBar], PriceFormat) +"   H="+ NumberToStr(High[highBar], PriceFormat) +"   L="+ NumberToStr(Low[lowBar], PriceFormat);
-   ObjectSetText(label.ohlc, strOHLC, 8, "", Black);
-
-   int error = GetLastError();
-   if (!error || error==ERR_OBJECT_DOES_NOT_EXIST)                               // bei offenem Properties-Dialog oder Object::onDrag()
-      return(true);
-   return(!catch("UpdateOHLC(2)", error));
 }
 
 
@@ -1801,9 +1525,9 @@ bool Positions.LogTickets() {
  */
 bool AnalyzePositions(bool logTickets=false) {
    logTickets = logTickets!=0;
-   if (logTickets)          positions.analyzed = false;                          // vorm Loggen werden die Positionen immer re-evaluiert
-   if (mode.remote.trading) positions.analyzed = true;
-   if (positions.analyzed)  return(true);
+   if (logTickets)         positions.analyzed = false;                           // vorm Loggen werden die Positionen immer re-evaluiert
+   if (mode.extern)        positions.analyzed = true;
+   if (positions.analyzed) return(true);
 
    int      tickets    [], openPositions;                                        // Positionsdetails
    int      types      [];
@@ -1814,14 +1538,13 @@ bool AnalyzePositions(bool logTickets=false) {
    double   swaps      [];
    double   profits    [];
 
-
-   // (1) Gesamtposition ermitteln
+   // Gesamtposition ermitteln
    longPosition  = 0;                                                            // globale Variablen
    shortPosition = 0;
    isPendings    = false;
 
-   // (1.1) mode.intern.trading
-   if (mode.intern.trading) {
+   // mode.intern
+   if (mode.intern) {
       bool lfxProfits = false;
       int pos, orders = OrdersTotal();
       int sortKeys[][2];                                                         // Sortierschlüssel der offenen Positionen: {OpenTime, Ticket}
@@ -1903,53 +1626,19 @@ bool AnalyzePositions(bool logTickets=false) {
       }
    }
 
-   // (1.2) mode.extern.notrading
-   if (mode.extern.notrading) {
-      openPositions = ArraySize(external.open.ticket);
-
-      // offene Positionen werden nicht bei jedem Tick, sondern nur in init() oder nach entsprechendem Event neu eingelesen
-      if (!external.open.lots.checked) {
-         external.open.longPosition  = 0;
-         external.open.shortPosition = 0;
-         for (i=0; i < openPositions; i++) {                                     // Gesamtposition je Richtung aufaddieren
-            if (external.open.type[i] == OP_BUY) external.open.longPosition  += external.open.lots[i];
-            else                                 external.open.shortPosition += external.open.lots[i];
-         }
-         external.open.lots.checked = true;
-      }
-      longPosition  = external.open.longPosition;
-      shortPosition = external.open.shortPosition;
-
-      if (openPositions > 0) {
-         ArrayCopy(tickets    , external.open.ticket    );                       // ExtractPosition() modifiziert die übergebenen Arrays, also Kopie der Originaldaten erstellen
-         ArrayCopy(types      , external.open.type      );
-         ArrayCopy(lots       , external.open.lots      );
-         ArrayCopy(openTimes  , external.open.openTime  );
-         ArrayCopy(openPrices , external.open.openPrice );
-         ArrayCopy(commissions, external.open.commission);
-         ArrayCopy(swaps      , external.open.swap      );
-         ArrayCopy(profits    , external.open.profit    );
-
-         for (i=0; i < openPositions; i++) {
-            profits[i] = ifDouble(types[i]==OP_LONG, Bid-openPrices[i], openPrices[i]-Ask)/Pips * PipValue(lots[i], true); // Fehler unterdrücken, INIT_PIPVALUE ist u.U. nicht gesetzt
-         }
-      }
-   }
-
-   // (1.3) Ergebnisse intern + extern
+   // Ergebnisse intern + extern
    longPosition  = NormalizeDouble(longPosition,  2);                            // globale Variablen
    shortPosition = NormalizeDouble(shortPosition, 2);
    totalPosition = NormalizeDouble(longPosition - shortPosition, 2);
    isPosition    = longPosition || shortPosition;
 
-
-   // (2) Positionen analysieren und in positions.~data[] speichern
+   // Positionen analysieren und in positions.~data[] speichern
    if (ArrayRange(positions.iData, 0) > 0) {
       ArrayResize(positions.iData, 0);
       ArrayResize(positions.dData, 0);
    }
 
-   // (2.1) individuelle Konfiguration parsen
+   // individuelle Konfiguration parsen
    int oldError = last_error;
    SetLastError(NO_ERROR);
    if (ArrayRange(positions.config, 0)==0) /*&&*/ if (!CustomPositions.ReadConfig()) {
@@ -1970,7 +1659,7 @@ bool AnalyzePositions(bool logTickets=false) {
    double customSwaps      [];
    double customProfits    [];
 
-   // (2.2) individuell konfigurierte Positionen aus den offenen Positionen extrahieren
+   // individuell konfigurierte Positionen aus den offenen Positionen extrahieren
    int confSize = ArrayRange(positions.config, 0);
 
    for (i=0, confLineIndex=0; i < confSize; i++) {
@@ -1983,7 +1672,7 @@ bool AnalyzePositions(bool logTickets=false) {
       if (!termType) {                                                           // termType=NULL => "Zeilenende"
          if (logTickets) AnalyzePositions.LogTickets(isCustomVirtual, customTickets, confLineIndex);
 
-         // (2.3) individuell konfigurierte Position speichern
+         // individuell konfigurierte Position speichern
          if (!StorePosition(isCustomVirtual, customLongPosition, customShortPosition, customTotalPosition, customTickets, customTypes, customLots, customOpenPrices, customCommissions, customSwaps, customProfits, closedProfit, adjustedProfit, customEquity, confLineIndex))
             return(false);
          isCustomVirtual     = false;
@@ -2014,7 +1703,7 @@ bool AnalyzePositions(bool logTickets=false) {
 
    if (logTickets) AnalyzePositions.LogTickets(false, tickets, -1);
 
-   // (2.4) verbleibende Position(en) speichern
+   // verbleibende Position(en) speichern
    if (!StorePosition(false, _longPosition, _shortPosition, _totalPosition, tickets, types, lots, openPrices, commissions, swaps, profits, EMPTY_VALUE, 0, 0, -1))
       return(false);
 
@@ -2032,103 +1721,79 @@ bool AnalyzePositions.LogTickets(bool isVirtual, int tickets[], int commentIndex
    isVirtual = isVirtual!=0;
 
    if (ArraySize(tickets) > 0) {
-      if (commentIndex > -1) log("LogTickets(2)  conf("+ commentIndex +") = \""+ positions.config.comments[commentIndex] +"\" = "+ TicketsToStr.Position(tickets) +" = "+ TicketsToStr(tickets, NULL));
-      else                   log("LogTickets(3)  conf(none) = "                                                                  + TicketsToStr.Position(tickets) +" = "+ TicketsToStr(tickets, NULL));
+      if (commentIndex > -1) logInfo("LogTickets(2)  conf("+ commentIndex +") = \""+ positions.config.comments[commentIndex] +"\" = "+ TicketsToStr.Position(tickets) +" = "+ TicketsToStr(tickets, NULL));
+      else                   logInfo("LogTickets(3)  conf(none) = "                                                                  + TicketsToStr.Position(tickets) +" = "+ TicketsToStr(tickets, NULL));
    }
    return(true);
 }
 
 
 /**
- * Aktualisiert die dynamischen Werte des Money-Managements.
+ * Calculate the position size according to the configured risk profile.
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
-bool UpdateMoneyManagement() {
-   if (mm.isDone          ) return(true);
-   if (mode.remote.trading) return(true);
- //if (mode.remote.trading) return(_true(debug("UpdateMoneyManagement(1)  feature not implemented for mode.remote.trading=true")));
+bool CalculatePositionSize() {
+   if (mode.extern || mm.done) return(true);                               // only for internal account
 
-   mm.lotValue            = 0;
-   mm.unleveragedLots     = 0;                                       // Lotsize bei Hebel 1:1
-   mm.ATRwAbs             = 0;                                       // wöchentliche ATR, absolut
-   mm.ATRwPct             = 0;                                       // wöchentliche ATR, prozentual
-   mm.equity              = 0;
+   mm.lotValue             = 0;
+   mm.unleveragedLots      = 0;                                            // unleveraged position size
+   mm.positionSize         = 0;                                            // position size for the configured risk
+   mm.normPositionSize     = 0;                                            // normalized position size
+   mm.positionSizeLeverage = 0;                                            // leverage of the calculated position size
+   mm.equity               = 0;                                            // currently used equity value incl. extern assets
 
-   mm.leverage            = 0;                                       // Hebel bei wöchentlicher Volatilität einer Unit von {mm.vola} Prozent
-   mm.unitSize            = 0;                                       // Lotsize für wöchentliche Volatilität einer Unit von {mm.vola} Prozent
-   mm.unitSize.normalized = 0;
-
-
-   // (1) unleveraged Lots
+   // calculate lot values and position sizes
    double tickSize       = MarketInfo(Symbol(), MODE_TICKSIZE      );
    double tickValue      = MarketInfo(Symbol(), MODE_TICKVALUE     );
    double marginRequired = MarketInfo(Symbol(), MODE_MARGINREQUIRED); if (marginRequired == -92233720368547760.) marginRequired = 0;
       int error = GetLastError();
-      if (IsError(error)) {
-         if (error == ERR_SYMBOL_NOT_AVAILABLE) {
-            SetLastError(ERS_TERMINAL_NOT_YET_READY);
-            //debug("UpdateMoneyManagement(2)  MarketInfo(\""+ Symbol() +"\") => ERR_SYMBOL_NOT_AVAILABLE", last_error);
-            return(false);
-         }
-         return(!catch("UpdateMoneyManagement(3)", error));
+      if (error || !Bid || !tickSize || !tickValue || !marginRequired) {   // can happen on terminal start, on change of account or template, or in offline charts
+         if (!error || error==ERR_SYMBOL_NOT_AVAILABLE)
+            return(!SetLastError(ERS_TERMINAL_NOT_YET_READY));
+         return(!catch("CalculatePositionSize(1)", error));
       }
-   double externalAssets = GetExternalAssets(tradeAccount.company, ifString(mode.extern.notrading, tradeAccount.alias, tradeAccount.number));
-   if (mode.intern.trading) {
-      double visibleEquity = AccountEquity()-AccountCredit();        // bei negativer AccountBalance wird nur visibleEquity benutzt
-         if (AccountBalance() > 0) visibleEquity = MathMin(AccountBalance(), visibleEquity);
-      mm.equity = visibleEquity + externalAssets;
+   double pointValue     = MathDiv(tickValue, MathDiv(tickSize, Point));
+   double pipValue       = PipPoints * pointValue;                         // pip value in account currency
+   double externalAssets = GetExternalAssets(tradeAccount.company, tradeAccount.number);
+   if (mode.intern) {
+      double accountEquity = AccountEquity()-AccountCredit();
+         if (AccountBalance() > 0) accountEquity = MathMin(AccountBalance(), accountEquity);
+      mm.equity = accountEquity + externalAssets;
    }
    else {
-      mm.equity = externalAssets;                                    // falsch, solange ExternalAssets bei mode.extern nicht ständig aktualisiert wird
+      mm.equity = externalAssets;                                          // TODO: wrong, not updated as GetExternalAssets() caches the result
    }
 
-   if (!Bid || !tickSize || !tickValue || !marginRequired)           // kann bei Start, Account-/Templatewechsel oder im Offline-Chart auftreten
-      return(!SetLastError(ERS_TERMINAL_NOT_YET_READY));
+   mm.lotValue             = Bid/tickSize * tickValue;                     // value of 1 lot in account currency
+   mm.unleveragedLots      = mm.equity/mm.lotValue;                        // unleveraged position size
 
-   mm.lotValue        = Bid/tickSize * tickValue;                    // Value eines Lots in Account-Currency
-   mm.unleveragedLots = mm.equity/mm.lotValue;                       // ungehebelte Lotsize (Leverage 1:1)
+   if (mm.risk && mm.stopDistance) {
+      double risk = mm.risk/100 * mm.equity;                               // risked amount in account currency
+      mm.positionSize         = risk/mm.stopDistance/pipValue;             // position size for risk and stop distance
+      mm.positionSizeLeverage = mm.positionSize/mm.unleveragedLots;        // leverage of the calculated position size
 
-   // (2) Expected TrueRange als Maximalwert von ATR und den letzten beiden Einzelwerten: ATR, TR[1] und TR[0]
-   double a = @ATR(NULL, PERIOD_W1, 100, 1, F_ERS_HISTORY_UPDATE);   // ATR(100xW): throws ERS_HISTORY_UPDATE (wenn, dann nur einmal)
-      if (last_error == ERS_HISTORY_UPDATE)
-         if (Period() != PERIOD_W1) SetLastError(NO_ERROR);          // ignore ERS_HISTORY_UPDATE in other timeframes as this is non-critical code
-      if (!a) return(false);
-   double b = @ATR(NULL, PERIOD_W1,  1, 1);                          // TrueRange letzte Woche
-      if (!b) return(false);
-   double c = @ATR(NULL, PERIOD_W1,  1, 0);                          // TrueRange aktuelle Woche
-      if (!c) return(false);
-   mm.ATRwAbs = MathMax(a, MathMax(b, c));
-   mm.ATRwPct = mm.ATRwAbs / Bid;
-   if (!mm.ATRwPct)
-      return(false);
-
-   // (3) resulting leverage and unit size
-   mm.leverage = mm.vola/(mm.ATRwPct*100);
-   mm.unitSize = mm.unleveragedLots * mm.leverage;                   // auf wöchentliche Volatilität gehebelte UnitSize
-
-   // (4) Lotsize runden
-   if (mm.unitSize > 0) {                                                                                                        // Abstufung max. 6.7% je Schritt
-      if      (mm.unitSize <=    0.03) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.001) *   0.001, 3);    //     0-0.03: Vielfaches von   0.001
-      else if (mm.unitSize <=   0.075) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.002) *   0.002, 3);    // 0.03-0.075: Vielfaches von   0.002
-      else if (mm.unitSize <=    0.1 ) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.005) *   0.005, 3);    //  0.075-0.1: Vielfaches von   0.005
-      else if (mm.unitSize <=    0.3 ) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.01 ) *   0.01 , 2);    //    0.1-0.3: Vielfaches von   0.01
-      else if (mm.unitSize <=    0.75) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.02 ) *   0.02 , 2);    //   0.3-0.75: Vielfaches von   0.02
-      else if (mm.unitSize <=    1.2 ) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.05 ) *   0.05 , 2);    //   0.75-1.2: Vielfaches von   0.05
-      else if (mm.unitSize <=    3.  ) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.1  ) *   0.1  , 1);    //      1.2-3: Vielfaches von   0.1
-      else if (mm.unitSize <=    7.5 ) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.2  ) *   0.2  , 1);    //      3-7.5: Vielfaches von   0.2
-      else if (mm.unitSize <=   12.  ) mm.unitSize.normalized = NormalizeDouble(MathRound(mm.unitSize/  0.5  ) *   0.5  , 1);    //     7.5-12: Vielfaches von   0.5
-      else if (mm.unitSize <=   30.  ) mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/  1    ) *   1       );    //      12-30: Vielfaches von   1
-      else if (mm.unitSize <=   75.  ) mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/  2    ) *   2       );    //      30-75: Vielfaches von   2
-      else if (mm.unitSize <=  120.  ) mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/  5    ) *   5       );    //     75-120: Vielfaches von   5
-      else if (mm.unitSize <=  300.  ) mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/ 10    ) *  10       );    //    120-300: Vielfaches von  10
-      else if (mm.unitSize <=  750.  ) mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/ 20    ) *  20       );    //    300-750: Vielfaches von  20
-      else if (mm.unitSize <= 1200.  ) mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/ 50    ) *  50       );    //   750-1200: Vielfaches von  50
-      else                             mm.unitSize.normalized =       MathRound(MathRound(mm.unitSize/100    ) * 100       );    //   1200-...: Vielfaches von 100
+      // normalize the calculated position size
+      if (mm.positionSize > 0) {                                                                                                          // Abstufung max. 6.7% je Schritt
+         if      (mm.positionSize <=    0.03) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.001) *   0.001, 3);     //     0-0.03: Vielfaches von   0.001
+         else if (mm.positionSize <=   0.075) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.002) *   0.002, 3);     // 0.03-0.075: Vielfaches von   0.002
+         else if (mm.positionSize <=    0.1 ) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.005) *   0.005, 3);     //  0.075-0.1: Vielfaches von   0.005
+         else if (mm.positionSize <=    0.3 ) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.01 ) *   0.01 , 2);     //    0.1-0.3: Vielfaches von   0.01
+         else if (mm.positionSize <=    0.75) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.02 ) *   0.02 , 2);     //   0.3-0.75: Vielfaches von   0.02
+         else if (mm.positionSize <=    1.2 ) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.05 ) *   0.05 , 2);     //   0.75-1.2: Vielfaches von   0.05
+         else if (mm.positionSize <=   10.  ) mm.normPositionSize = NormalizeDouble(MathRound(mm.positionSize/  0.1  ) *   0.1  , 1);     //     1.2-10: Vielfaches von   0.1
+         else if (mm.positionSize <=   30.  ) mm.normPositionSize =       MathRound(MathRound(mm.positionSize/  1    ) *   1       );     //      12-30: Vielfaches von   1
+         else if (mm.positionSize <=   75.  ) mm.normPositionSize =       MathRound(MathRound(mm.positionSize/  2    ) *   2       );     //      30-75: Vielfaches von   2
+         else if (mm.positionSize <=  120.  ) mm.normPositionSize =       MathRound(MathRound(mm.positionSize/  5    ) *   5       );     //     75-120: Vielfaches von   5
+         else if (mm.positionSize <=  300.  ) mm.normPositionSize =       MathRound(MathRound(mm.positionSize/ 10    ) *  10       );     //    120-300: Vielfaches von  10
+         else if (mm.positionSize <=  750.  ) mm.normPositionSize =       MathRound(MathRound(mm.positionSize/ 20    ) *  20       );     //    300-750: Vielfaches von  20
+         else if (mm.positionSize <= 1200.  ) mm.normPositionSize =       MathRound(MathRound(mm.positionSize/ 50    ) *  50       );     //   750-1200: Vielfaches von  50
+         else                                 mm.normPositionSize =       MathRound(MathRound(mm.positionSize/100    ) * 100       );     //   1200-...: Vielfaches von 100
+      }
    }
 
-   mm.isDone = true;
-   return(!catch("UpdateMoneyManagement(5)"));
+   mm.done = true;
+   return(!catch("CalculatePositionSize(2)"));
 }
 
 
@@ -2220,10 +1885,9 @@ bool CustomPositions.ReadConfig() {
    datetime from, to;
    bool     isPositionEmpty, isPositionVirtual, isPositionGrouped, isTotal;
    if (!minLotSize || !lotStep) return(false);                       // falls MarketInfo()-Daten noch nicht verfügbar sind
+   if (mode.extern)             return(!catch("CustomPositions.ReadConfig(1)  feature for mode.extern=true not yet implemented", ERR_NOT_IMPLEMENTED));
 
-   if (mode.remote.trading) return(!catch("CustomPositions.ReadConfig(1)  feature for mode.remote.trading=true not yet implemented", ERR_NOT_IMPLEMENTED));
-
-   string file     = GetAccountConfigPath(tradeAccount.company, ifString(mode.extern.notrading, tradeAccount.alias, tradeAccount.number));
+   string file     = GetAccountConfigPath(tradeAccount.company, tradeAccount.number); if (!StringLen(file)) return(false);
    string section  = "CustomPositions";
    int    keysSize = GetIniKeys(file, section, keys);
 
@@ -2498,28 +2162,28 @@ bool CustomPositions.ParseOpenTerm(string term, string &openComments, bool &isTo
       // {DateTime}-{DateTime}
       // {DateTime}-NULL
       //       NULL-{DateTime}
-      dtFrom = ParseDateTime(StrTrim(StrLeft (term,  pos  )), isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
-      dtTo   = ParseDateTime(StrTrim(StrSubstr(term, pos+1)), isFullYear2, isFullMonth2, isFullWeek2, isFullDay2, isFullHour2, isFullMinute2); if (IsNaT(dtTo  )) return(false);
+      dtFrom = ParseDateTimeEx(StrTrim(StrLeft (term,  pos  )), isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
+      dtTo   = ParseDateTimeEx(StrTrim(StrSubstr(term, pos+1)), isFullYear2, isFullMonth2, isFullWeek2, isFullDay2, isFullHour2, isFullMinute2); if (IsNaT(dtTo  )) return(false);
       if (dtTo != NULL) {
-         if      (isFullYear2  ) dtTo  = DateTime(TimeYearFix(dtTo)+1)                  - 1*SECOND;   // Jahresende
-         else if (isFullMonth2 ) dtTo  = DateTime(TimeYearFix(dtTo), TimeMonth(dtTo)+1) - 1*SECOND;   // Monatsende
-         else if (isFullWeek2  ) dtTo += 1*WEEK                                         - 1*SECOND;   // Wochenende
-         else if (isFullDay2   ) dtTo += 1*DAY                                          - 1*SECOND;   // Tagesende
-         else if (isFullHour2  ) dtTo -=                                                  1*SECOND;   // Ende der vorhergehenden Stunde
-       //else if (isFullMinute2) dtTo -=                                                  1*SECOND;   // nicht bei Minuten (deaktivert)
+         if      (isFullYear2  ) dtTo  = DateTime(TimeYearEx(dtTo)+1)                  - 1*SECOND;    // Jahresende
+         else if (isFullMonth2 ) dtTo  = DateTime(TimeYearEx(dtTo), TimeMonth(dtTo)+1) - 1*SECOND;    // Monatsende
+         else if (isFullWeek2  ) dtTo += 1*WEEK                                        - 1*SECOND;    // Wochenende
+         else if (isFullDay2   ) dtTo += 1*DAY                                         - 1*SECOND;    // Tagesende
+         else if (isFullHour2  ) dtTo -=                                                 1*SECOND;    // Ende der vorhergehenden Stunde
+       //else if (isFullMinute2) dtTo -=                                                 1*SECOND;    // nicht bei Minuten (deaktivert)
       }
    }
    else {
       // {DateTime}                                                  // einzelnen Zeitraum parsen
       isSingleTimespan = true;
-      dtFrom = ParseDateTime(term, isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
-                                                                                                                         if (!dtFrom)  return(!catch("CustomPositions.ParseOpenTerm(2)  invalid open positions configuration in "+ DoubleQuoteStr(term.orig), ERR_INVALID_CONFIG_VALUE));
-      if      (isFullYear1  ) dtTo = DateTime(TimeYearFix(dtFrom)+1)                    - 1*SECOND;   // Jahresende
-      else if (isFullMonth1 ) dtTo = DateTime(TimeYearFix(dtFrom), TimeMonth(dtFrom)+1) - 1*SECOND;   // Monatsende
-      else if (isFullWeek1  ) dtTo = dtFrom + 1*WEEK                                    - 1*SECOND;   // Wochenende
-      else if (isFullDay1   ) dtTo = dtFrom + 1*DAY                                     - 1*SECOND;   // Tagesende
-      else if (isFullHour1  ) dtTo = dtFrom + 1*HOUR                                    - 1*SECOND;   // Ende der Stunde
-      else if (isFullMinute1) dtTo = dtFrom + 1*MINUTE                                  - 1*SECOND;   // Ende der Minute
+      dtFrom = ParseDateTimeEx(term, isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
+                                                                                                                      if (!dtFrom)  return(!catch("CustomPositions.ParseOpenTerm(2)  invalid open positions configuration in "+ DoubleQuoteStr(term.orig), ERR_INVALID_CONFIG_VALUE));
+      if      (isFullYear1  ) dtTo = DateTime(TimeYearEx(dtFrom)+1)                    - 1*SECOND;    // Jahresende
+      else if (isFullMonth1 ) dtTo = DateTime(TimeYearEx(dtFrom), TimeMonth(dtFrom)+1) - 1*SECOND;    // Monatsende
+      else if (isFullWeek1  ) dtTo = dtFrom + 1*WEEK                                   - 1*SECOND;    // Wochenende
+      else if (isFullDay1   ) dtTo = dtFrom + 1*DAY                                    - 1*SECOND;    // Tagesende
+      else if (isFullHour1  ) dtTo = dtFrom + 1*HOUR                                   - 1*SECOND;    // Ende der Stunde
+      else if (isFullMinute1) dtTo = dtFrom + 1*MINUTE                                 - 1*SECOND;    // Ende der Minute
       else                    dtTo = dtFrom;
    }
    //debug("CustomPositions.ParseOpenTerm(0.1)  dtFrom="+ TimeToStr(dtFrom, TIME_FULL) +"  dtTo="+ TimeToStr(dtTo, TIME_FULL));
@@ -2702,28 +2366,28 @@ bool CustomPositions.ParseHstTerm(string term, string &positionComment, string &
       // {DateTime}-{DateTime}
       // {DateTime}-NULL
       //       NULL-{DateTime}
-      dtFrom = ParseDateTime(StrTrim(StrLeft (term,  pos  )), isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
-      dtTo   = ParseDateTime(StrTrim(StrSubstr(term, pos+1)), isFullYear2, isFullMonth2, isFullWeek2, isFullDay2, isFullHour2, isFullMinute2); if (IsNaT(dtTo  )) return(false);
+      dtFrom = ParseDateTimeEx(StrTrim(StrLeft (term,  pos  )), isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
+      dtTo   = ParseDateTimeEx(StrTrim(StrSubstr(term, pos+1)), isFullYear2, isFullMonth2, isFullWeek2, isFullDay2, isFullHour2, isFullMinute2); if (IsNaT(dtTo  )) return(false);
       if (dtTo != NULL) {
-         if      (isFullYear2  ) dtTo  = DateTime(TimeYearFix(dtTo)+1)                  - 1*SECOND;   // Jahresende
-         else if (isFullMonth2 ) dtTo  = DateTime(TimeYearFix(dtTo), TimeMonth(dtTo)+1) - 1*SECOND;   // Monatsende
-         else if (isFullWeek2  ) dtTo += 1*WEEK                                         - 1*SECOND;   // Wochenende
-         else if (isFullDay2   ) dtTo += 1*DAY                                          - 1*SECOND;   // Tagesende
-         else if (isFullHour2  ) dtTo -=                                                  1*SECOND;   // Ende der vorhergehenden Stunde
-       //else if (isFullMinute2) dtTo -=                                                  1*SECOND;   // nicht bei Minuten (deaktiviert)
+         if      (isFullYear2  ) dtTo  = DateTime(TimeYearEx(dtTo)+1)                  - 1*SECOND;    // Jahresende
+         else if (isFullMonth2 ) dtTo  = DateTime(TimeYearEx(dtTo), TimeMonth(dtTo)+1) - 1*SECOND;    // Monatsende
+         else if (isFullWeek2  ) dtTo += 1*WEEK                                        - 1*SECOND;    // Wochenende
+         else if (isFullDay2   ) dtTo += 1*DAY                                         - 1*SECOND;    // Tagesende
+         else if (isFullHour2  ) dtTo -=                                                 1*SECOND;    // Ende der vorhergehenden Stunde
+       //else if (isFullMinute2) dtTo -=                                                 1*SECOND;    // nicht bei Minuten (deaktiviert)
       }
    }
    else {
       // {DateTime}                                                  // einzelnen Zeitraum parsen
       isSingleTimespan = true;
-      dtFrom = ParseDateTime(term, isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
-                                                                                                                         if (!dtFrom)  return(!catch("CustomPositions.ParseHstTerm(3)  invalid history configuration in "+ DoubleQuoteStr(term.orig), ERR_INVALID_CONFIG_VALUE));
-      if      (isFullYear1  ) dtTo = DateTime(TimeYearFix(dtFrom)+1)                    - 1*SECOND;   // Jahresende
-      else if (isFullMonth1 ) dtTo = DateTime(TimeYearFix(dtFrom), TimeMonth(dtFrom)+1) - 1*SECOND;   // Monatsende
-      else if (isFullWeek1  ) dtTo = dtFrom + 1*WEEK                                    - 1*SECOND;   // Wochenende
-      else if (isFullDay1   ) dtTo = dtFrom + 1*DAY                                     - 1*SECOND;   // Tagesende
-      else if (isFullHour1  ) dtTo = dtFrom + 1*HOUR                                    - 1*SECOND;   // Ende der Stunde
-      else if (isFullMinute1) dtTo = dtFrom + 1*MINUTE                                  - 1*SECOND;   // Ende der Minute
+      dtFrom = ParseDateTimeEx(term, isFullYear1, isFullMonth1, isFullWeek1, isFullDay1, isFullHour1, isFullMinute1); if (IsNaT(dtFrom)) return(false);
+                                                                                                                      if (!dtFrom)       return(!catch("CustomPositions.ParseHstTerm(3)  invalid history configuration in "+ DoubleQuoteStr(term.orig), ERR_INVALID_CONFIG_VALUE));
+      if      (isFullYear1  ) dtTo = DateTime(TimeYearEx(dtFrom)+1)                    - 1*SECOND;    // Jahresende
+      else if (isFullMonth1 ) dtTo = DateTime(TimeYearEx(dtFrom), TimeMonth(dtFrom)+1) - 1*SECOND;    // Monatsende
+      else if (isFullWeek1  ) dtTo = dtFrom + 1*WEEK                                   - 1*SECOND;    // Wochenende
+      else if (isFullDay1   ) dtTo = dtFrom + 1*DAY                                    - 1*SECOND;    // Tagesende
+      else if (isFullHour1  ) dtTo = dtFrom + 1*HOUR                                   - 1*SECOND;    // Ende der Stunde
+      else if (isFullMinute1) dtTo = dtFrom + 1*MINUTE                                 - 1*SECOND;    // Ende der Minute
       else                    dtTo = dtFrom;
    }
    //debug("CustomPositions.ParseHstTerm(0.1)  dtFrom="+ TimeToStr(dtFrom, TIME_FULL) +"  dtTo="+ TimeToStr(dtTo, TIME_FULL) +"  grouped="+ isGroupingTerm);
@@ -2738,18 +2402,18 @@ bool CustomPositions.ParseHstTerm(string term, string &positionComment, string &
 
       // (3) Gruppen anlegen und komplette Zeilen direkt hier einfügen (bei der letzten Gruppe jedoch ohne Zeilenende)
       datetime groupFrom, groupTo, nextGroupFrom, now=TimeCurrentEx("CustomPositions.ParseHstTerm(6)");
-      if      (groupByMonth) groupFrom = DateTime(TimeYearFix(dtFrom), TimeMonth(dtFrom));
-      else if (groupByWeek ) groupFrom = dtFrom - dtFrom%DAYS - (TimeDayOfWeekFix(dtFrom)+6)%7 * DAYS;
+      if      (groupByMonth) groupFrom = DateTime(TimeYearEx(dtFrom), TimeMonth(dtFrom));
+      else if (groupByWeek ) groupFrom = dtFrom - dtFrom%DAYS - (TimeDayOfWeekEx(dtFrom)+6)%7 * DAYS;
       else if (groupByDay  ) groupFrom = dtFrom - dtFrom%DAYS;
 
       if (!dtTo) {                                                                                       // {DateTime} - NULL
-         if      (groupByMonth) dtTo = DateTime(TimeYearFix(now), TimeMonth(now)+1)        - 1*SECOND;   // aktuelles Monatsende
-         else if (groupByWeek ) dtTo = now - now%DAYS + (7-TimeDayOfWeekFix(now))%7 * DAYS - 1*SECOND;   // aktuelles Wochenende
-         else if (groupByDay  ) dtTo = now - now%DAYS + 1*DAY                              - 1*SECOND;   // aktuelles Tagesende
+         if      (groupByMonth) dtTo = DateTime(TimeYearEx(now), TimeMonth(now)+1)        - 1*SECOND;    // aktuelles Monatsende
+         else if (groupByWeek ) dtTo = now - now%DAYS + (7-TimeDayOfWeekEx(now))%7 * DAYS - 1*SECOND;    // aktuelles Wochenende
+         else if (groupByDay  ) dtTo = now - now%DAYS + 1*DAY                             - 1*SECOND;    // aktuelles Tagesende
       }
 
       for (bool firstGroup=true; groupFrom < dtTo; groupFrom=nextGroupFrom) {
-         if      (groupByMonth) nextGroupFrom = DateTime(TimeYearFix(groupFrom), TimeMonth(groupFrom)+1);
+         if      (groupByMonth) nextGroupFrom = DateTime(TimeYearEx(groupFrom), TimeMonth(groupFrom)+1);
          else if (groupByWeek ) nextGroupFrom = groupFrom + 7*DAYS;
          else if (groupByDay  ) nextGroupFrom = groupFrom + 1*DAY;
          groupTo   = nextGroupFrom - 1*SECOND;
@@ -2908,7 +2572,7 @@ bool CustomPositions.ParseHstTerm(string term, string &positionComment, string &
  *  {value} = Today                                • Synonym für ThisDay
  *  {value} = Yesterday                            • Synonym für LastDay
  */
-datetime ParseDateTime(string value, bool &isYear, bool &isMonth, bool &isWeek, bool &isDay, bool &isHour, bool &isMinute) {
+datetime ParseDateTimeEx(string value, bool &isYear, bool &isMonth, bool &isWeek, bool &isDay, bool &isHour, bool &isMinute) {
    string   value.orig=value, values[], sYY, sMM, sDD, sTime, sHH, sII, sSS;
    int      valuesSize, iYY, iMM, iDD, iHH, iII, iSS, dow;
 
@@ -2936,7 +2600,7 @@ datetime ParseDateTime(string value, bool &isYear, bool &isMonth, bool &isWeek, 
          else if (value == "YESTERDAY") value = "LASTDAY";
 
          date = now;
-         dow  = TimeDayOfWeekFix(date);
+         dow  = TimeDayOfWeekEx(date);
          if      (dow == SATURDAY) date -= 1*DAY;                    // an Wochenenden Datum auf den vorherigen Freitag setzen
          else if (dow == SUNDAY  ) date -= 2*DAYS;
 
@@ -2945,21 +2609,21 @@ datetime ParseDateTime(string value, bool &isYear, bool &isMonth, bool &isWeek, 
             if (dow != MONDAY) date -= 1*DAY;                        // Datum auf den vorherigen Tag setzen
             else               date -= 3*DAYS;                       // an Wochenenden Datum auf den vorherigen Freitag setzen
          }
-         iYY   = TimeYearFix(date);
-         iMM   = TimeMonth  (date);
-         iDD   = TimeDayFix (date);
+         iYY   = TimeYearEx(date);
+         iMM   = TimeMonth (date);
+         iDD   = TimeDayEx (date);
          isDay = true;
       }
 
       else if (StrEndsWith(value, "WEEK")) {
-         date = now - (TimeDayOfWeekFix(now)+6)%7 * DAYS;            // Datum auf Wochenbeginn setzen
+         date = now - (TimeDayOfWeekEx(now)+6)%7 * DAYS;             // Datum auf Wochenbeginn setzen
          if (value != "THISWEEK") {
             if (value != "LASTWEEK")                                 return(_NaT(catch("ParseDateTime(1)  invalid history configuration in "+ DoubleQuoteStr(value.orig), ERR_INVALID_CONFIG_VALUE)));
             date -= 1*WEEK;                                          // Datum auf die vorherige Woche setzen
          }
-         iYY    = TimeYearFix(date);
-         iMM    = TimeMonth  (date);
-         iDD    = TimeDayFix (date);
+         iYY    = TimeYearEx(date);
+         iMM    = TimeMonth (date);
+         iDD    = TimeDayEx (date);
          isWeek = true;
       }
 
@@ -2967,10 +2631,10 @@ datetime ParseDateTime(string value, bool &isYear, bool &isMonth, bool &isWeek, 
          date = now;
          if (value != "THISMONTH") {
             if (value != "LASTMONTH")                                return(_NaT(catch("ParseDateTime(1)  invalid history configuration in "+ DoubleQuoteStr(value.orig), ERR_INVALID_CONFIG_VALUE)));
-            date = DateTime(TimeYearFix(date), TimeMonth(date)-1);   // Datum auf den vorherigen Monat setzen
+            date = DateTime(TimeYearEx(date), TimeMonth(date)-1);    // Datum auf den vorherigen Monat setzen
          }
-         iYY     = TimeYearFix(date);
-         iMM     = TimeMonth  (date);
+         iYY     = TimeYearEx(date);
+         iMM     = TimeMonth (date);
          iDD     = 1;
          isMonth = true;
       }
@@ -2979,9 +2643,9 @@ datetime ParseDateTime(string value, bool &isYear, bool &isMonth, bool &isWeek, 
          date = now;
          if (value != "THISYEAR") {
             if (value != "LASTYEAR")                                 return(_NaT(catch("ParseDateTime(1)  invalid history configuration in "+ DoubleQuoteStr(value.orig), ERR_INVALID_CONFIG_VALUE)));
-            date = DateTime(TimeYearFix(date)-1);                    // Datum auf das vorherige Jahr setzen
+            date = DateTime(TimeYearEx(date)-1);                     // Datum auf das vorherige Jahr setzen
          }
-         iYY    = TimeYearFix(date);
+         iYY    = TimeYearEx(date);
          iMM    = 1;
          iDD    = 1;
          isYear = true;
@@ -3090,7 +2754,7 @@ datetime ParseDateTime(string value, bool &isYear, bool &isMonth, bool &isWeek, 
    // (2) DateTime aus geparsten Werten erzeugen
    datetime result = DateTime(iYY, iMM, iDD, iHH, iII, iSS);
    if (isWeek)                                                       // wenn volle Woche, dann Zeit auf Wochenbeginn setzen
-      result -= (TimeDayOfWeekFix(result)+6)%7 * DAYS;
+      result -= (TimeDayOfWeekEx(result)+6)%7 * DAYS;
    return(result);
 }
 
@@ -3251,7 +2915,7 @@ bool ExtractPosition(int type, double value1, double value2, double &cache1, dou
 
    else if (type == TERM_OPEN_ALL) {
       // offene Positionen aller Symbole eines Zeitraumes
-      warn("ExtractPosition(1)  type=TERM_OPEN_ALL not yet implemented");
+      logWarn("ExtractPosition(1)  type=TERM_OPEN_ALL not yet implemented");
    }
 
    else if (type==TERM_HISTORY_SYMBOL || type==TERM_HISTORY_ALL) {
@@ -3507,11 +3171,11 @@ bool StorePosition(bool isVirtual, double longPosition, double shortPosition, do
       closedProfit = 0;                                                       // 0.00 ist gültiger P/L
 
    static double externalAssets = EMPTY_VALUE;
-   if (IsEmptyValue(externalAssets)) externalAssets = GetExternalAssets(tradeAccount.company, ifString(mode.extern.notrading, tradeAccount.alias, tradeAccount.number));
+   if (IsEmptyValue(externalAssets)) externalAssets = GetExternalAssets(tradeAccount.company, tradeAccount.number);
 
-   if (customEquity != NULL)   equity  = customEquity;
-   else {                      equity  = externalAssets;
-      if (mode.intern.trading) equity += (AccountEquity()-AccountCredit());   // TODO: tatsächlichen Wert von openEquity ermitteln
+   if (customEquity != NULL) equity  = customEquity;
+   else {                    equity  = externalAssets;
+      if (mode.intern)       equity += (AccountEquity()-AccountCredit());   // TODO: tatsächlichen Wert von openEquity ermitteln
    }
 
    // Die Position besteht aus einem gehedgtem Anteil (konstanter Profit) und einem direktionalen Anteil (variabler Profit).
@@ -3519,7 +3183,7 @@ bool StorePosition(bool isVirtual, double longPosition, double shortPosition, do
    // - direktionaler Anteil:       Breakeven unter Berücksichtigung des Profits eines gehedgten Anteils berechnen
 
 
-   // (1) Profit und BE-Distance einer eventuellen Hedgeposition ermitteln
+   // Profit und BE-Distance einer eventuellen Hedgeposition ermitteln
    if (longPosition && shortPosition) {
       hedgedLots     = MathMin(longPosition, shortPosition);
       remainingLong  = hedgedLots;
@@ -3607,8 +3271,8 @@ bool StorePosition(bool isVirtual, double longPosition, double shortPosition, do
    }
 
 
-   // (2) Direktionaler Anteil: Bei Breakeven-Berechnung den Profit eines gehedgten Anteils und AdjustedProfit berücksichtigen.
-   // (2.1) eventuelle Longposition ermitteln
+   // Direktionaler Anteil: Bei Breakeven-Berechnung den Profit eines gehedgten Anteils und AdjustedProfit berücksichtigen.
+   // eventuelle Longposition ermitteln
    if (totalPosition > 0) {
       remainingLong  = totalPosition;
       openPrice      = 0;
@@ -3671,7 +3335,7 @@ bool StorePosition(bool isVirtual, double longPosition, double shortPosition, do
    }
 
 
-   // (2.2) eventuelle Shortposition ermitteln
+   // eventuelle Shortposition ermitteln
    if (totalPosition < 0) {
       remainingShort = -totalPosition;
       openPrice      = 0;
@@ -3734,7 +3398,7 @@ bool StorePosition(bool isVirtual, double longPosition, double shortPosition, do
    }
 
 
-   // (2.3) ohne offene Positionen muß ClosedProfit (kann 0.00 sein) oder AdjustedProfit gesetzt sein
+   // ohne offene Positionen muß ClosedProfit (kann 0.00 sein) oder AdjustedProfit gesetzt sein
    // History mit leerer Position speichern
    size = ArrayRange(positions.iData, 0);
    ArrayResize(positions.iData, size+1);
@@ -3765,7 +3429,7 @@ bool StorePosition(bool isVirtual, double longPosition, double shortPosition, do
  * @return bool - Erfolgsstatus
  */
 bool QC.HandleLfxTerminalMessages() {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    // (1) ggf. Receiver starten
    if (!hQC.TradeToLfxReceiver) /*&&*/ if (!QC.StartLfxReceiver())
@@ -3827,10 +3491,10 @@ bool ProcessLfxTerminalMessage(string message) {
 
    // Da hier in kurzer Zeit sehr viele Messages eingehen können, werden sie zur Beschleunigung statt mit Explode() manuell zerlegt.
    // LFX-Prefix
-   if (StringSubstr(message, 0, 4) != "LFX:")                                        return(_true(warn("ProcessLfxTerminalMessage(2)  unknown message format \""+ message +"\"")));
+   if (StringSubstr(message, 0, 4) != "LFX:")                                        return(!logWarn("ProcessLfxTerminalMessage(2)  unknown message format \""+ message +"\""));
    // LFX-Ticket
-   int from=4, to=StringFind(message, ":", from);                   if (to <= from)  return(_true(warn("ProcessLfxTerminalMessage(3)  unknown message \""+ message +"\" (illegal order ticket)")));
-   int ticket = StrToInteger(StringSubstr(message, from, to-from)); if (ticket <= 0) return(_true(warn("ProcessLfxTerminalMessage(4)  unknown message \""+ message +"\" (illegal order ticket)")));
+   int from=4, to=StringFind(message, ":", from);                   if (to <= from)  return(!logWarn("ProcessLfxTerminalMessage(3)  unknown message \""+ message +"\" (illegal order ticket)"));
+   int ticket = StrToInteger(StringSubstr(message, from, to-from)); if (ticket <= 0) return(!logWarn("ProcessLfxTerminalMessage(4)  unknown message \""+ message +"\" (illegal order ticket)"));
    // LFX-Parameter
    double profit;
    bool   success;
@@ -3854,27 +3518,27 @@ bool ProcessLfxTerminalMessage(string message) {
    // :pending={1|0}
    if (StringSubstr(message, from, 8) == "pending=") {
       success = (StrToInteger(StringSubstr(message, from+8)) != 0);
-      if (success) { if (__LOG()) log("ProcessLfxTerminalMessage(5)  #"+ ticket +" pending order "+ ifString(success, "notification", "error"                           )); }
-      else         {             warn("ProcessLfxTerminalMessage(6)  #"+ ticket +" pending order "+ ifString(success, "notification", "error (what use case is this???)")); }
+      if (success) { if (IsLogInfo()) logInfo("ProcessLfxTerminalMessage(5)  #"+ ticket +" pending order "+ ifString(success, "notification", "error"                           )); }
+      else         {                  logWarn("ProcessLfxTerminalMessage(6)  #"+ ticket +" pending order "+ ifString(success, "notification", "error (what use case is this???)")); }
       return(RestoreLfxOrders(false));                                        // LFX-Orders neu einlesen (auch bei Fehler)
    }
 
    // :open={1|0}
    if (StringSubstr(message, from, 5) == "open=") {
       success = (StrToInteger(StringSubstr(message, from+5)) != 0);
-      if (__LOG()) log("ProcessLfxTerminalMessage(7)  #"+ ticket +" open position "+ ifString(success, "notification", "error"));
+      if (IsLogInfo()) logInfo("ProcessLfxTerminalMessage(7)  #"+ ticket +" open position "+ ifString(success, "notification", "error"));
       return(RestoreLfxOrders(false));                                        // LFX-Orders neu einlesen (auch bei Fehler)
    }
 
    // :close={1|0}
    if (StringSubstr(message, from, 6) == "close=") {
       success = (StrToInteger(StringSubstr(message, from+6)) != 0);
-      if (__LOG()) log("ProcessLfxTerminalMessage(8)  #"+ ticket +" close position "+ ifString(success, "notification", "error"));
+      if (IsLogInfo()) logInfo("ProcessLfxTerminalMessage(8)  #"+ ticket +" close position "+ ifString(success, "notification", "error"));
       return(RestoreLfxOrders(false));                                        // LFX-Orders neu einlesen (auch bei Fehler)
    }
 
    // ???
-   return(_true(warn("ProcessLfxTerminalMessage(9)  unknown message \""+ message +"\"")));
+   return(!logWarn("ProcessLfxTerminalMessage(9)  unknown message \""+ message +"\""));
 }
 
 
@@ -3911,7 +3575,6 @@ bool RestoreLfxOrders(bool fromCache) {
       return(true);
    }
 
-
    // (2) Orderdaten neu einlesen: Sind wir nicht in einem init()-Cycle, werden im Cache noch vorhandene Daten vorm Überschreiben gespeichert.
    if (ArrayRange(lfxOrders.iCache, 0) > 0) {
       if (!SaveLfxOrderCache()) return(false);
@@ -3923,15 +3586,15 @@ bool RestoreLfxOrders(bool fromCache) {
    lfxOrders.openPositions    = 0;
    lfxOrders.pendingPositions = 0;
 
-   // solange in mode.remote.trading noch lfxCurrency und lfxCurrencyId benutzt werden, bei Nicht-LFX-Instrumenten hier abbrechen
-   if (mode.remote.trading) /*&&*/ if (!StrEndsWith(Symbol(), "LFX"))
+   // solange in mode.extern noch lfxCurrency und lfxCurrencyId benutzt werden, bei Nicht-LFX-Instrumenten hier abbrechen
+   if (mode.extern) /*&&*/ if (!StrEndsWith(Symbol(), "LFX"))
       return(true);
 
    // LFX-Orders einlesen
    string currency = "";
    int    flags    = NULL;
-   if      (mode.intern.trading) {                         flags = OF_OPENPOSITION;     }    // offene Positionen aller LFX-Währungen (zum Managen von Profitbetrags-Exit-Limiten)
-   else if (mode.remote.trading) { currency = lfxCurrency; flags = OF_OPEN | OF_CLOSED; }    // alle Orders der aktuellen LFX-Währung (zur Anzeige)
+   if      (mode.intern) {                         flags = OF_OPENPOSITION;     }   // offene Positionen aller LFX-Währungen (zum Managen von Profitbetrags-Exit-Limiten)
+   else if (mode.extern) { currency = lfxCurrency; flags = OF_OPEN | OF_CLOSED; }   // alle Orders der aktuellen LFX-Währung (zur Anzeige)
 
    size = LFX.GetOrders(currency, flags, lfxOrders); if (size==-1) return(false);
 
@@ -4005,7 +3668,7 @@ bool SaveLfxOrderCache() {
  * @return bool - Erfolgsstatus
  */
 bool QC.HandleTradeCommands() {
-   if (!__CHART()) return(true);
+   if (!IsChart()) return(true);
 
    // (1) ggf. Receiver starten
    if (!hQC.TradeCmdReceiver) /*&&*/ if (!QC.StartTradeCmdReceiver())
@@ -4037,7 +3700,7 @@ bool QC.HandleTradeCommands() {
    for (int i=0; i < msgsSize; i++) {
       if (!StringLen(msgs[i])) continue;
       msgs[i] = StrReplace(msgs[i], HTML_TAB, TAB);
-      log("QC.HandleTradeCommands(7)  received \""+ msgs[i] +"\"");
+      logInfo("QC.HandleTradeCommands(7)  received \""+ msgs[i] +"\"");
 
       string cmdType = StrTrim(StrLeftTo(msgs[i], "{"));
 
@@ -4114,46 +3777,17 @@ bool AnalyzePos.ProcessLfxProfits() {
 /**
  * Speichert die Laufzeitkonfiguration im Fenster (für Init-Cycle und neue Templates) und im Chart (für Terminal-Restart).
  *
- *  (1) string tradeAccount.company, int tradeAccount.number (wenn mode.extern.notrading=TRUE)
- *  (2) bool   positions.absoluteProfits
- *
  * @return bool - Erfolgsstatus
  */
 bool StoreRuntimeStatus() {
-   // (1) string tradeAccount.company, int tradeAccount.number (wenn mode.extern.notrading=TRUE)
-   // Company-ID im Fenster speichern bzw. löschen
-   int    hWnd    = __ExecutionContext[EC.hChart];
-   string key     = __NAME() +".runtime.tradeAccount.company";       // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   if (mode.extern.notrading) SetWindowProperty(hWnd, key, AccountCompanyId(tradeAccount.company));
-   else                       RemoveWindowProperty(hWnd, key);
-   // Company-ID im Chart speichern bzw. löschen
-   if (ObjectFind(key) == 0)
-      ObjectDelete(key);
-   if (mode.extern.notrading) {
-      ObjectCreate (key, OBJ_LABEL, 0, 0, 0);
-      ObjectSet    (key, OBJPROP_TIMEFRAMES, OBJ_PERIODS_NONE);
-      ObjectSetText(key, ""+ AccountCompanyId(tradeAccount.company));
-   }
+   // bool positions.absoluteProfits
 
-   // AccountNumber im Fenster speichern bzw. löschen
-   key = __NAME() +".runtime.tradeAccount.number";                   // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   if (mode.extern.notrading) SetWindowProperty(hWnd, key, tradeAccount.number);
-   else                       RemoveWindowProperty(hWnd, key);
-   // AccountNumber im Chart speichern bzw. löschen
-   if (ObjectFind(key) == 0)
-      ObjectDelete(key);
-   if (mode.extern.notrading) {
-      ObjectCreate (key, OBJ_LABEL, 0, 0, 0);
-      ObjectSet    (key, OBJPROP_TIMEFRAMES, OBJ_PERIODS_NONE);
-      ObjectSetText(key, ""+ tradeAccount.number);
-   }
-
-
-   // (2) bool positions.absoluteProfits
    // Konfiguration im Fenster speichern
-   key       = __NAME() +".runtime.positions.absoluteProfits";       // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   int value = ifInt(positions.absoluteProfits, 1, -1);
-   SetWindowProperty(hWnd, key, value);
+   int   hWnd = __ExecutionContext[EC.hChart];
+   string key = ProgramName() +".runtime.positions.absoluteProfits";    // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
+   int  value = ifInt(positions.absoluteProfits, 1, -1);
+   SetWindowIntegerA(hWnd, key, value);
+
    // Konfiguration im Chart speichern
    if (ObjectFind(key) == 0)
       ObjectDelete(key);
@@ -4168,60 +3802,16 @@ bool StoreRuntimeStatus() {
 /**
  * Restauriert eine im Fenster oder im Chart gespeicherte Laufzeitkonfiguration.
  *
- *  (1) string tradeAccount.company, int tradeAccount.number (wenn mode.extern.notrading=TRUE)
- *  (2) bool   positions.absoluteProfits
- *
  * @return bool - Erfolgsstatus
  */
 bool RestoreRuntimeStatus() {
-   // (1) string tradeAccount.company, int tradeAccount.number
-   int companyId, accountNumber;
-   // Company-ID im Fenster suchen
-   int    hWnd    = __ExecutionContext[EC.hChart];
-   string key     = __NAME() +".runtime.tradeAccount.company";          // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   int    value   = GetWindowProperty(hWnd, key);
-   bool   success = (value != 0);
-   // bei Mißerfolg Company-ID im Chart suchen
-   if (!success) {
-      if (ObjectFind(key) == 0) {
-         value   = StrToInteger(ObjectDescription(key));
-         success = (value != 0);
-      }
-   }
-   if (success) companyId = value;
+   // bool positions.absoluteProfits
 
-   // AccountNumber im Fenster suchen
-   key     = __NAME() +".runtime.tradeAccount.number";                  // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   value   = GetWindowProperty(hWnd, key);
-   success = (value != 0);
-   // bei Mißerfolg AccountNumber im Chart suchen
-   if (!success) {
-      if (ObjectFind(key) == 0) {
-         value   = StrToInteger(ObjectDescription(key));
-         success = (value != 0);
-      }
-   }
-   if (success) accountNumber = value;
-
-   // Account restaurieren
-   if (companyId && accountNumber) {
-      if (!InitTradeAccount(companyId +":"+ accountNumber)) return(false);
-      if (!UpdateAccountDisplay())                          return(false);
-      if (mode.extern.notrading) {
-         external.open.lots.checked = false;
-         if (ReadExternalPositions(tradeAccount.company, tradeAccount.alias) == -1)
-            return(false);
-      }
-      ArrayResize(positions.config,          0);
-      ArrayResize(positions.config.comments, 0);
-   }
-
-
-   // (2) bool positions.absoluteProfits
    // Konfiguration im Fenster suchen
-   key     = __NAME() +".runtime.positions.absoluteProfits";         // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
-   value   = GetWindowProperty(hWnd, key);
-   success = (value != 0);
+   int   hWnd = __ExecutionContext[EC.hChart];
+   string key = ProgramName() +".runtime.positions.absoluteProfits";    // TODO: Schlüssel global verwalten und Instanz-ID des Indikators integrieren
+   int value  = GetWindowIntegerA(hWnd, key);
+   bool success = (value != 0);
    // bei Mißerfolg Konfiguration im Chart suchen
    if (!success) {
       if (ObjectFind(key) == 0) {
@@ -4232,305 +3822,6 @@ bool RestoreRuntimeStatus() {
    if (success) positions.absoluteProfits = (value > 0);
 
    return(!catch("RestoreRuntimeStatus(1)"));
-}
-
-
-/**
- * Liest die externen offenen und geschlossenen Positionen des aktiven Signals ein. Die Positionen sind bereits sortiert gespeichert und
- * müssen nicht nochmal sortiert werden.
- *
- * @param  string provider - Signalprovider
- * @param  string signal   - Signal
- *
- * @return int - Anzahl der gelesenen Positionen oder -1 (EMPTY), falls ein Fehler auftrat
- */
-int ReadExternalPositions(string provider, string signal) {
-   // (1.1) offene Positionen: alle Schlüssel einlesen
-   string file = GetMqlFilesPath() +"\\"+ provider +"\\"+ signal +"_open.ini";
-      if (!IsFileA(file)) return(_EMPTY(catch("ReadExternalPositions(1)  file not found: "+ DoubleQuoteStr(file), ERR_RUNTIME_ERROR)));
-   string section = provider +"."+ signal;
-   string keys[], symbol = StdSymbol();
-   int keysSize = GetIniKeys(file, section, keys);
-
-   ArrayResize(external.open.ticket    , 0);
-   ArrayResize(external.open.type      , 0);
-   ArrayResize(external.open.lots      , 0);
-   ArrayResize(external.open.openTime  , 0);
-   ArrayResize(external.open.openPrice , 0);
-   ArrayResize(external.open.takeProfit, 0);
-   ArrayResize(external.open.stopLoss  , 0);
-   ArrayResize(external.open.commission, 0);
-   ArrayResize(external.open.swap      , 0);
-   ArrayResize(external.open.profit    , 0);
-
-   // (1.2) Schlüssel gegen aktuelles Symbol prüfen und Positionen einlesen
-   for (int i=0; i < keysSize; i++) {
-      string key = keys[i];
-      if (StrStartsWith(key, symbol +".")) {
-
-         // (1.2.1) Zeile lesen
-         string value = GetIniStringA(file, section, key, "");
-         if (!StringLen(value))                       return(_EMPTY(catch("ReadExternalPositions(2)  invalid ini entry ["+ section +"]->"+ key +" in \""+ file +"\" (empty)", ERR_RUNTIME_ERROR)));
-
-         // (1.2.2) Positionsdaten validieren
-         //Symbol.Ticket = Type, Lots, OpenTime, OpenPrice, TakeProfit, StopLoss, Commission, Swap, MagicNumber, Comment
-         string sValue, values[];
-         if (Explode(value, ",", values, NULL) != 10) return(_EMPTY(catch("ReadExternalPositions(3)  invalid position entry ("+ ArraySize(values) +" substrings) ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // Ticket
-         sValue = StrSubstr(key, StringLen(symbol));
-         if (StringGetChar(sValue, 0) != '.')         return(_EMPTY(catch("ReadExternalPositions(4)  invalid ticket \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         sValue = StringSubstr(sValue, 1);
-         if (!StrIsDigit(sValue))                     return(_EMPTY(catch("ReadExternalPositions(5)  invalid ticket \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         int _ticket = StrToInteger(sValue);
-         if (_ticket <= 0)                            return(_EMPTY(catch("ReadExternalPositions(6)  invalid ticket \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // Type
-         sValue = StrTrim(values[0]);
-         int _type = StrToOperationType(sValue);
-         if (!IsOrderType(_type))                     return(_EMPTY(catch("ReadExternalPositions(7)  invalid order type \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // Lots
-         sValue = StrTrim(values[1]);
-         if (!StrIsNumeric(sValue))                   return(_EMPTY(catch("ReadExternalPositions(8)  invalid lot size \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         double _lots = StrToDouble(sValue);
-         if (_lots <= 0)                              return(_EMPTY(catch("ReadExternalPositions(9)  invalid lot size \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _lots = NormalizeDouble(_lots, 2);
-
-         // OpenTime
-         sValue = StrTrim(values[2]);
-         datetime _openTime = StrToTime(sValue);
-         if (!_openTime)                              return(_EMPTY(catch("ReadExternalPositions(10)  invalid open time \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // OpenPrice
-         sValue = StrTrim(values[3]);
-         if (!StrIsNumeric(sValue))                   return(_EMPTY(catch("ReadExternalPositions(11)  invalid open price \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         double _openPrice = StrToDouble(sValue);
-         if (_openPrice <= 0)                         return(_EMPTY(catch("ReadExternalPositions(12)  invalid open price \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _openPrice = NormalizeDouble(_openPrice, Digits);
-
-         // TakeProfit
-         sValue = StrTrim(values[4]);
-         double _takeProfit = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(13)  invalid takeprofit \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _takeProfit = StrToDouble(sValue);
-            if (_takeProfit < 0)                      return(_EMPTY(catch("ReadExternalPositions(14)  invalid takeprofit \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _takeProfit = NormalizeDouble(_takeProfit, Digits);
-         }
-
-         // StopLoss
-         sValue = StrTrim(values[5]);
-         double _stopLoss = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(15)  invalid stoploss \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _stopLoss = StrToDouble(sValue);
-            if (_stopLoss < 0)                        return(_EMPTY(catch("ReadExternalPositions(16)  invalid stoploss \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _stopLoss = NormalizeDouble(_stopLoss, Digits);
-         }
-
-         // Commission
-         sValue = StrTrim(values[6]);
-         double _commission = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(17)  invalid commission value \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _commission = NormalizeDouble(StrToDouble(sValue), 2);
-         }
-
-         // Swap
-         sValue = StrTrim(values[7]);
-         double _swap = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(18)  invalid swap value \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _swap = NormalizeDouble(StrToDouble(sValue), 2);
-         }
-
-         // MagicNumber: vorerst nicht benötigt
-         // Comment:     vorerst nicht benötigt
-
-         // (1.2.3) Position in die globalen Arrays schreiben (erst nach vollständiger erfolgreicher Validierung)
-         int size=ArraySize(external.open.ticket), newSize=size+1;
-         ArrayResize(external.open.ticket    , newSize);
-         ArrayResize(external.open.type      , newSize);
-         ArrayResize(external.open.lots      , newSize);
-         ArrayResize(external.open.openTime  , newSize);
-         ArrayResize(external.open.openPrice , newSize);
-         ArrayResize(external.open.takeProfit, newSize);
-         ArrayResize(external.open.stopLoss  , newSize);
-         ArrayResize(external.open.commission, newSize);
-         ArrayResize(external.open.swap      , newSize);
-         ArrayResize(external.open.profit    , newSize);
-
-         external.open.ticket    [size] = _ticket;
-         external.open.type      [size] = _type;
-         external.open.lots      [size] = _lots;
-         external.open.openTime  [size] = _openTime;
-         external.open.openPrice [size] = _openPrice;
-         external.open.takeProfit[size] = _takeProfit;
-         external.open.stopLoss  [size] = _stopLoss;
-         external.open.commission[size] = _commission;
-         external.open.swap      [size] = _swap;
-         external.open.profit    [size] = ifDouble(_type==OP_LONG, Bid-_openPrice, _openPrice-Ask)/Pips * PipValue(_lots, true);   // Fehler unterdrücken, INIT_PIPVALUE ist u.U. nicht gesetzt
-      }
-   }
-
-
-   // (2.1) geschlossene Positionen: alle Schlüssel einlesen
-   file = GetMqlFilesPath() +"\\"+ provider +"\\"+ signal +"_closed.ini";
-      if (!IsFileA(file)) return(_EMPTY(catch("ReadExternalPositions(19)  file not found: "+ DoubleQuoteStr(file), ERR_RUNTIME_ERROR)));
-   section  = provider +"."+ signal;
-   keysSize = GetIniKeys(file, section, keys);
-
-   ArrayResize(external.closed.ticket    , 0);
-   ArrayResize(external.closed.type      , 0);
-   ArrayResize(external.closed.lots      , 0);
-   ArrayResize(external.closed.openTime  , 0);
-   ArrayResize(external.closed.openPrice , 0);
-   ArrayResize(external.closed.closeTime , 0);
-   ArrayResize(external.closed.closePrice, 0);
-   ArrayResize(external.closed.takeProfit, 0);
-   ArrayResize(external.closed.stopLoss  , 0);
-   ArrayResize(external.closed.commission, 0);
-   ArrayResize(external.closed.swap      , 0);
-   ArrayResize(external.closed.profit    , 0);
-
-   // (2.2) Schlüssel gegen aktuelles Symbol prüfen und Positionen einlesen
-   for (i=0; i < keysSize; i++) {
-      key = keys[i];
-      if (StrStartsWith(key, symbol +".")) {
-         // (2.2.1) Zeile lesen
-         value = GetIniStringA(file, section, key, "");
-         if (!StringLen(value))                       return(_EMPTY(catch("ReadExternalPositions(20)  invalid ini entry ["+ section +"]->"+ key +" in \""+ file +"\" (empty)", ERR_RUNTIME_ERROR)));
-
-         // (2.2.2) Positionsdaten validieren
-         //Symbol.Ticket = Type, Lots, OpenTime, OpenPrice, CloseTime, ClosePrice, TakeProfit, StopLoss, Commission, Swap, Profit, MagicNumber, Comment
-         if (Explode(value, ",", values, NULL) != 13) return(_EMPTY(catch("ReadExternalPositions(21)  invalid position entry ("+ ArraySize(values) +" substrings) ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // Ticket
-         sValue = StrSubstr(key, StringLen(symbol));
-         if (StringGetChar(sValue, 0) != '.')         return(_EMPTY(catch("ReadExternalPositions(22)  invalid ticket \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         sValue = StringSubstr(sValue, 1);
-         if (!StrIsDigit(sValue))                     return(_EMPTY(catch("ReadExternalPositions(23)  invalid ticket \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _ticket = StrToInteger(sValue);
-         if (_ticket <= 0)                            return(_EMPTY(catch("ReadExternalPositions(24)  invalid ticket \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // Type
-         sValue = StrTrim(values[0]);
-         _type  = StrToOperationType(sValue);
-         if (!IsOrderType(_type))                     return(_EMPTY(catch("ReadExternalPositions(25)  invalid order type \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // Lots
-         sValue = StrTrim(values[1]);
-         if (!StrIsNumeric(sValue))                   return(_EMPTY(catch("ReadExternalPositions(26)  invalid lot size \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _lots = StrToDouble(sValue);
-         if (_lots <= 0)                              return(_EMPTY(catch("ReadExternalPositions(27)  invalid lot size \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _lots = NormalizeDouble(_lots, 2);
-
-         // OpenTime
-         sValue    = StrTrim(values[2]);
-         _openTime = StrToTime(sValue);
-         if (!_openTime)                              return(_EMPTY(catch("ReadExternalPositions(28)  invalid open time \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // OpenPrice
-         sValue = StrTrim(values[3]);
-         if (!StrIsNumeric(sValue))                   return(_EMPTY(catch("ReadExternalPositions(29)  invalid open price \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _openPrice = StrToDouble(sValue);
-         if (_openPrice <= 0)                         return(_EMPTY(catch("ReadExternalPositions(30)  invalid open price \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _openPrice = NormalizeDouble(_openPrice, Digits);
-
-         // CloseTime
-         sValue = StrTrim(values[4]);
-         datetime _closeTime = StrToTime(sValue);
-         if (!_closeTime)                             return(_EMPTY(catch("ReadExternalPositions(31)  invalid open time \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-
-         // ClosePrice
-         sValue = StrTrim(values[5]);
-         if (!StrIsNumeric(sValue))                   return(_EMPTY(catch("ReadExternalPositions(32)  invalid open price \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         double _closePrice = StrToDouble(sValue);
-         if (_closePrice <= 0)                        return(_EMPTY(catch("ReadExternalPositions(33)  invalid open price \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         _closePrice = NormalizeDouble(_closePrice, Digits);
-
-         // TakeProfit
-         sValue      = StrTrim(values[6]);
-         _takeProfit = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(34)  invalid takeprofit \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _takeProfit = StrToDouble(sValue);
-            if (_takeProfit < 0)                      return(_EMPTY(catch("ReadExternalPositions(35)  invalid takeprofit \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _takeProfit = NormalizeDouble(_takeProfit, Digits);
-         }
-
-         // StopLoss
-         sValue    = StrTrim(values[7]);
-         _stopLoss = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(36)  invalid stoploss \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _stopLoss = StrToDouble(sValue);
-            if (_stopLoss < 0)                        return(_EMPTY(catch("ReadExternalPositions(37)  invalid stoploss \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _stopLoss = NormalizeDouble(_stopLoss, Digits);
-         }
-
-         // Commission
-         sValue      = StrTrim(values[8]);
-         _commission = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(38)  invalid commission value \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _commission = NormalizeDouble(StrToDouble(sValue), 2);
-         }
-
-         // Swap
-         sValue = StrTrim(values[9]);
-         _swap  = 0;
-         if (sValue != "") {
-            if (!StrIsNumeric(sValue))                return(_EMPTY(catch("ReadExternalPositions(39)  invalid swap value \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-            _swap = NormalizeDouble(StrToDouble(sValue), 2);
-         }
-
-         // Profit
-         sValue = StrTrim(values[10]);
-         if (sValue == "")                            return(_EMPTY(catch("ReadExternalPositions(40)  invalid profit value \"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         if (!StrIsNumeric(sValue))                   return(_EMPTY(catch("ReadExternalPositions(41)  invalid profit value \""+ sValue +"\" in position entry ["+ section +"]->"+ key +" = \""+ StrReplaceR(StrReplaceR(value, " ,", ","), ",  ", ", ") +"\" in \""+ file +"\"", ERR_RUNTIME_ERROR)));
-         double _profit = NormalizeDouble(StrToDouble(sValue), 2);
-
-         // MagicNumber: vorerst nicht benötigt
-         // Comment:     vorerst nicht benötigt
-
-         // (2.2.3) Position in die globalen Arrays schreiben (erst nach vollständiger erfolgreicher Validierung)
-         size=ArraySize(external.closed.ticket); newSize=size+1;
-         ArrayResize(external.closed.ticket    , newSize);
-         ArrayResize(external.closed.type      , newSize);
-         ArrayResize(external.closed.lots      , newSize);
-         ArrayResize(external.closed.openTime  , newSize);
-         ArrayResize(external.closed.openPrice , newSize);
-         ArrayResize(external.closed.closeTime , newSize);
-         ArrayResize(external.closed.closePrice, newSize);
-         ArrayResize(external.closed.takeProfit, newSize);
-         ArrayResize(external.closed.stopLoss  , newSize);
-         ArrayResize(external.closed.commission, newSize);
-         ArrayResize(external.closed.swap      , newSize);
-         ArrayResize(external.closed.profit    , newSize);
-
-         external.closed.ticket    [size] = _ticket;
-         external.closed.type      [size] = _type;
-         external.closed.lots      [size] = _lots;
-         external.closed.openTime  [size] = _openTime;
-         external.closed.openPrice [size] = _openPrice;
-         external.closed.closeTime [size] = _closeTime;
-         external.closed.closePrice[size] = _closePrice;
-         external.closed.takeProfit[size] = _takeProfit;
-         external.closed.stopLoss  [size] = _stopLoss;
-         external.closed.commission[size] = _commission;
-         external.closed.swap      [size] = _swap;
-         external.closed.profit    [size] = _profit;
-      }
-   }
-
-
-   ArrayResize(keys,   0);
-   ArrayResize(values, 0);
-   if (!catch("ReadExternalPositions(42)"))
-      return(ArraySize(external.open.ticket) + ArraySize(external.closed.ticket));
-   return(-1);
 }
 
 
@@ -4698,9 +3989,9 @@ bool onOrderFail(int tickets[]) {
       int    pipDigits   = digits & (~1);
       string priceFormat = StringConcatenate(".", pipDigits, ifString(digits==pipDigits, "", "'"));
       string price       = NumberToStr(OrderOpenPrice(), priceFormat);
-      string message     = "Order failed: #"+ tickets[i] +" "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" at "+ price + NL +"with error: \""+ OrderComment() +"\""+ NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ tradeAccount.alias +")";
+      string message     = "Order failed: #"+ tickets[i] +" "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" at "+ price + NL +"with error: \""+ OrderComment() +"\""+ NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ GetAccountAlias(tradeAccount.company, tradeAccount.number) +")";
 
-      if (__LOG()) log("onOrderFail(2)  "+ message);
+      if (IsLogInfo()) logInfo("onOrderFail(2)  "+ message);
 
       // Signale für jede Order einzeln verschicken
       if (signal.mail) error |= !SendEmail(signal.mail.sender, signal.mail.receiver, message, message);
@@ -4737,9 +4028,9 @@ bool onPositionOpen(int tickets[]) {
       int    pipDigits   = digits & (~1);
       string priceFormat = StringConcatenate(".", pipDigits, ifString(digits==pipDigits, "", "'"));
       string price       = NumberToStr(OrderOpenPrice(), priceFormat);
-      string message     = "Position opened: #"+ tickets[i] +" "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" at "+ price + NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ tradeAccount.alias +")";
+      string message     = "Position opened: #"+ tickets[i] +" "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" at "+ price + NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ GetAccountAlias(tradeAccount.company, tradeAccount.number) +")";
 
-      if (__LOG()) log("onPositionOpen(2)  "+ message);
+      if (IsLogInfo()) logInfo("onPositionOpen(2)  "+ message);
 
       // Signale für jede Position einzeln verschicken
       if (signal.mail) error |= !SendEmail(signal.mail.sender, signal.mail.receiver, message, message);
@@ -4781,9 +4072,9 @@ bool onPositionClose(int tickets[][]) {
       string priceFormat = StringConcatenate(".", pipDigits, ifString(digits==pipDigits, "", "'"));
       string openPrice   = NumberToStr(OrderOpenPrice(), priceFormat);
       string closePrice  = NumberToStr(OrderClosePrice(), priceFormat);
-      string message     = "Position closed: #"+ ticket +" "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" open="+ openPrice +" close="+ closePrice + closeTypeDescr[closeType] + NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ tradeAccount.alias +")";
+      string message     = "Position closed: #"+ ticket +" "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" open="+ openPrice +" close="+ closePrice + closeTypeDescr[closeType] + NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ GetAccountAlias(tradeAccount.company, tradeAccount.number) +")";
 
-      if (__LOG()) log("onPositionClose(2)  "+ message);
+      if (IsLogInfo()) logInfo("onPositionClose(2)  "+ message);
 
       // Signale für jede Position einzeln verschicken
       if (signal.mail) error |= !SendEmail(signal.mail.sender, signal.mail.receiver, message, message);
@@ -4798,27 +4089,21 @@ bool onPositionClose(int tickets[][]) {
 
 
 /**
- * Lädt die Konfigurationsdatei des aktuellen Accounts in den Editor.
+ * Load the current account configuration into the editor.
  *
- * @return bool - Erfolgsstatus
+ * @return bool - success status
  */
 bool EditAccountConfig() {
-   string files[];
+   string file, files[];
 
-   if (mode.intern.trading) {
-      ArrayPushString(files, GetAccountConfigPath(tradeAccount.company, tradeAccount.number));
+   if (mode.extern) {
+      file = GetAccountConfigPath(); if (!StringLen(file)) return(false);
+      ArrayPushString(files, file);
    }
-   else if (mode.extern.notrading) {
-      ArrayPushString(files, GetMqlFilesPath() +"\\"+ tradeAccount.company +"\\"+ tradeAccount.alias +"_open.ini"  );
-      ArrayPushString(files, GetMqlFilesPath() +"\\"+ tradeAccount.company +"\\"+ tradeAccount.alias +"_closed.ini");
-      ArrayPushString(files, GetAccountConfigPath(tradeAccount.company, tradeAccount.alias));
-   }
-   else if (mode.remote.trading) {
-      ArrayPushString(files, GetAccountConfigPath());
-      ArrayPushString(files, GetAccountConfigPath(tradeAccount.company, tradeAccount.number));
-   }
+   file = GetAccountConfigPath(tradeAccount.company, tradeAccount.number); if (!StringLen(file)) return(false);
+   ArrayPushString(files, file);
 
-   if (!EditFiles(files)) return(false);
+   return(EditFiles(files));
 }
 
 
@@ -4847,18 +4132,18 @@ string InputsToStr() {
    int      ArrayPushDouble   (double array[], double value);
    int      ArraySpliceInts   (int    array[], int offset, int length);
    bool     ChartMarker.OrderSent_A(int ticket, int digits, color markerColor);
-   int      DeleteRegisteredObjects(string prefix);
+   int      DeleteRegisteredObjects();
    bool     EditFiles(string filenames[]);
    datetime FxtToServerTime(datetime fxtTime);
    string   GetHostName();
    string   GetLongSymbolNameOrAlt(string symbol, string altValue);
-   datetime GetPrevSessionStartTime.srv(datetime serverTime);
-   datetime GetSessionStartTime.srv(datetime serverTime);
    string   GetStandardSymbol(string symbol);
    string   GetSymbolName(string symbol);
-   int      ObjectRegister(string label);
+   int      RegisterObject(string label);
    bool     ReleaseLock(string mutexName);
    int      SearchStringArrayI(string haystack[], string needle);
+   string   StringsToStr(string array[], string separator);
+   string   TicketsToStr(int    array[], string separator);
 
 #import "rsfLib2.ex4"
    int      ArrayInsertDoubleArray(double array[][], int offset, double values[]);
@@ -4868,8 +4153,6 @@ string InputsToStr() {
 
    string   IntsToStr            (int    array[], string separator);
    string   DoublesToStr         (double array[], string separator);
-   string   StringsToStr         (string array[], string separator);
-   string   TicketsToStr         (int    array[], string separator);
    string   TicketsToStr.Lots    (int    array[], string separator);
    string   TicketsToStr.Position(int    array[]);
 #import

@@ -1,9 +1,9 @@
 
 #define __lpSuperContext NULL
-int     __WHEREAMI__   = NULL;                                       // current MQL core function: CF_INIT | CF_START | CF_DEINIT
+int     __CoreFunction = NULL;                                       // currently executed MQL core function: CF_INIT | CF_START | CF_DEINIT
 
 // current price series
-double rates[][6];
+double __rates[][6];
 
 
 /**
@@ -15,25 +15,25 @@ int init() {
    if (__STATUS_OFF)
       return(__STATUS_OFF.reason);
 
-   if (__WHEREAMI__ == NULL)                                         // init() called by the terminal, all variables are reset
-      __WHEREAMI__ = CF_INIT;
+   if (__CoreFunction == NULL)                                       // init() called by the terminal, all variables are reset
+      __CoreFunction = CF_INIT;
 
    if (!IsDllsAllowed()) {
-      ForceAlert("DLL function calls are not enabled. Please go to Tools -> Options -> Expert Advisors and allow DLL imports.");
+      ForceAlert("Please enable DLL function calls for this script.");
       last_error          = ERR_DLL_CALLS_NOT_ALLOWED;
       __STATUS_OFF        = true;
       __STATUS_OFF.reason = last_error;
       return(last_error);
    }
    if (!IsLibrariesAllowed()) {
-      ForceAlert("MQL library calls are not enabled. Please load the script with \"Allow imports of external experts\" enabled.");
+      ForceAlert("Please enable MQL library calls for this script.");
       last_error          = ERR_EX4_CALLS_NOT_ALLOWED;
       __STATUS_OFF        = true;
       __STATUS_OFF.reason = last_error;
       return(last_error);
    }
 
-   int error = SyncMainContext_init(__ExecutionContext, MT_SCRIPT, WindowExpertName(), UninitializeReason(), SumInts(__INIT_FLAGS__), SumInts(__DEINIT_FLAGS__), Symbol(), Period(), Digits, Point, false, false, IsTesting(), IsVisualMode(), IsOptimization(), __lpSuperContext, WindowHandle(Symbol(), NULL), WindowOnDropped(), WindowXOnDropped(), WindowYOnDropped());
+   int error = SyncMainContext_init(__ExecutionContext, MT_SCRIPT, WindowExpertName(), UninitializeReason(), SumInts(__InitFlags), SumInts(__DeinitFlags), Symbol(), Period(), Digits, Point, false, false, IsTesting(), IsVisualMode(), IsOptimization(), __lpSuperContext, WindowHandle(Symbol(), NULL), WindowOnDropped(), WindowXOnDropped(), WindowYOnDropped());
    if (!error) error = GetLastError();                               // detect a DLL exception
    if (IsError(error)) {
       ForceAlert("ERROR:   "+ Symbol() +","+ PeriodDescription(Period()) +"  "+ WindowExpertName() +"::init(1)->SyncMainContext_init()  ["+ ErrorToStr(error) +"]");
@@ -45,7 +45,7 @@ int init() {
 
 
    // (1) finish initialization
-   if (!init.GlobalVars()) if (CheckErrors("init(2)")) return(last_error);
+   if (!initContext()) if (CheckErrors("init(2)")) return(last_error);
 
 
    // (2) user-spezifische Init-Tasks ausführen
@@ -78,31 +78,22 @@ int init() {
 
 
 /**
- * Update global variables and the script's EXECUTION_CONTEXT.
+ * Update global variables and the script's EXECUTION_CONTEXT. Called immediately after SyncMainContext_init().
  *
  * @return bool - success status
  */
-bool init.GlobalVars() {
+bool initContext() {
    PipDigits      = Digits & (~1);                                        SubPipDigits      = PipDigits+1;
    PipPoints      = MathRound(MathPow(10, Digits & 1));                   PipPoint          = PipPoints;
    Pips           = NormalizeDouble(1/MathPow(10, PipDigits), PipDigits); Pip               = Pips;
    PipPriceFormat = StringConcatenate(".", PipDigits);                    SubPipPriceFormat = StringConcatenate(PipPriceFormat, "'");
    PriceFormat    = ifString(Digits==PipDigits, PipPriceFormat, SubPipPriceFormat);
 
-   ec_SetLogEnabled          (__ExecutionContext, init.IsLogEnabled());
-   ec_SetLogToDebugEnabled   (__ExecutionContext, GetConfigBool("Logging", "LogToDebug", true));
-   ec_SetLogToTerminalEnabled(__ExecutionContext, true);
+   N_INF = MathLog(0);                                      // negative infinity
+   P_INF = -N_INF;                                          // positive infinity
+   NaN   =  N_INF - N_INF;                                  // not-a-number
 
-   __LOG_WARN.mail  = false;
-   __LOG_WARN.sms   = false;
-   __LOG_ERROR.mail = false;
-   __LOG_ERROR.sms  = false;
-
-   N_INF = MathLog(0);
-   P_INF = -N_INF;
-   NaN   =  N_INF - N_INF;
-
-   return(!catch("init.GlobalVars(1)"));
+   return(!catch("initContext(1)"));
 }
 
 
@@ -120,7 +111,7 @@ int start() {
       }
       return(__STATUS_OFF.reason);
    }
-   __WHEREAMI__   = CF_START;
+   __CoreFunction = CF_START;
 
    Tick++;                                                                    // einfache Zähler, die konkreten Werte haben keine Bedeutung
    Tick.Time      = MarketInfo(Symbol(), MODE_TIME);                          // TODO: !!! MODE_TIME ist im synthetischen Chart NULL               !!!
@@ -129,9 +120,9 @@ int start() {
    UnchangedBars  = -1;                                                       // ...
    ShiftedBars    = -1;                                                       // ...
 
-   ArrayCopyRates(rates);
+   ArrayCopyRates(__rates);
 
-   if (SyncMainContext_start(__ExecutionContext, rates, Bars, ChangedBars, Tick, Tick.Time, Bid, Ask) != NO_ERROR) {
+   if (SyncMainContext_start(__ExecutionContext, __rates, Bars, ChangedBars, Tick, Tick.Time, Bid, Ask) != NO_ERROR) {
       if (CheckErrors("start(2)")) return(last_error);
    }
 
@@ -170,7 +161,7 @@ int start() {
  * @return int - Fehlerstatus
  */
 int deinit() {
-   __WHEREAMI__ = CF_DEINIT;
+   __CoreFunction = CF_DEINIT;
 
    if (!IsDllsAllowed() || !IsLibrariesAllowed() || last_error==ERR_TERMINAL_INIT_FAILURE || last_error==ERR_DLL_EXCEPTION)
       return(last_error);
@@ -178,16 +169,9 @@ int deinit() {
    int error = SyncMainContext_deinit(__ExecutionContext, UninitializeReason());
    if (IsError(error)) return(error|last_error|LeaveContext(__ExecutionContext));
 
-   // Pre/Postprocessing-Hook
-   error = onDeinit();                                               // Preprocessing-Hook
-   if (error != -1) {
-      afterDeinit();                                                 // Postprocessing-Hook nur ausführen, wenn Preprocessing-Hook
-   }                                                                 // nicht mit -1 zurückkehrt.
-
-   // User-spezifische Deinit-Tasks
-   if (!error) {
-      // ...
-   }
+   error     = onDeinit();                                           // preprocessing hook
+   if (!error) afterDeinit();                                        // postprocessing hook
+   if (!error && !last_error && !This.IsTesting()) DeleteRegisteredObjects();
 
    CheckErrors("deinit(2)");
    return(error|last_error|LeaveContext(__ExecutionContext));        // the very last statement
@@ -258,7 +242,7 @@ int HandleScriptError(string location, string message, int error) {
       location = " :: "+ location;
 
    PlaySoundEx("Windows Chord.wav");
-   MessageBox(message, "Script "+ __NAME() + location, MB_ICONERROR|MB_OK);
+   MessageBox(message, "Script "+ ProgramName() + location, MB_ICONERROR|MB_OK);
 
    return(SetLastError(error));
 }
@@ -326,19 +310,6 @@ bool CheckErrors(string location, int setError = NULL) {
    // suppress compiler warnings
    __DummyCalls();
    HandleScriptError(NULL, NULL, NULL);
-   SetCustomLog(NULL);
-}
-
-
-/**
- * Configure the use of a custom logfile.
- *
- * @param  string filename - name of a custom logfile or an empty string to disable custom logging
- *
- * @return bool - success status
- */
-bool SetCustomLog(string filename) {
-   return(SetCustomLogA(__ExecutionContext, filename));
 }
 
 
@@ -349,13 +320,9 @@ bool SetCustomLog(string filename) {
    string GetWindowText(int hWnd);
 
 #import "rsfExpander.dll"
-   bool   ec_SetLogEnabled          (int ec[], int status);
-   bool   ec_SetLogToDebugEnabled   (int ec[], int status);
-   bool   ec_SetLogToTerminalEnabled(int ec[], int status);
-   bool   SetCustomLogA             (int ec[], string file);
-   int    SyncMainContext_init      (int ec[], int programType, string programName, int uninitReason, int initFlags, int deinitFlags, string symbol, int timeframe, int digits, double point, int extReporting, int recordEquity, int isTesting, int isVisualMode, int isOptimization, int lpSec, int hChart, int droppedOnChart, int droppedOnPosX, int droppedOnPosY);
-   int    SyncMainContext_start     (int ec[], double rates[][], int bars, int changedBars, int ticks, datetime time, double bid, double ask);
-   int    SyncMainContext_deinit    (int ec[], int uninitReason);
+   int    SyncMainContext_init  (int ec[], int programType, string programName, int uninitReason, int initFlags, int deinitFlags, string symbol, int timeframe, int digits, double point, int extReporting, int recordEquity, int isTesting, int isVisualMode, int isOptimization, int lpSec, int hChart, int droppedOnChart, int droppedOnPosX, int droppedOnPosY);
+   int    SyncMainContext_start (int ec[], double rates[][], int bars, int changedBars, int ticks, datetime time, double bid, double ask);
+   int    SyncMainContext_deinit(int ec[], int uninitReason);
 
 #import "user32.dll"
    int    GetParent(int hWnd);

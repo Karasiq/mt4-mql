@@ -34,14 +34,14 @@ void @Bands.UpdateLegend(string label, string name, string status, color bandsCo
          sUpperValue = DoubleToStr(upperValue, digits);
          sLowerValue = DoubleToStr(lowerValue, digits);
       }
-      string text = StringConcatenate(name, "    ", sUpperValue, " / ", sLowerValue, "    ", status);
+      string text = StringConcatenate(name, "    ", sUpperValue, " : ", sLowerValue, "    ", status);
       color  textColor = bandsColor;
       if      (textColor == Yellow) textColor = Orange;
       else if (textColor == Gold  ) textColor = Orange;
       ObjectSetText(label, text, 9, "Arial Fett", textColor);
 
       int error = GetLastError();
-      if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)  // on open "Properties" dialog or on Object::onDrag()
+      if (IsError(error)) /*&&*/ if (error!=ERR_OBJECT_DOES_NOT_EXIST)  // on Object::onDrag() or opened "Properties" dialog
          return(catch("@Bands.UpdateLegend(1)", error));
    }
 

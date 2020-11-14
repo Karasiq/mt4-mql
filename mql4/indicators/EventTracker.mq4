@@ -4,7 +4,7 @@
  *
  *
  * (1) Order-Events (Trading)
- *     Ein aktiver Order-EventTracker überwacht alle Symbole eines Accounts, nicht nur das des aktuellen Charts. Es liegt in
+ *     Ein aktiver OrderEvent-Tracker überwacht alle Symbole eines Accounts, nicht nur das des aktuellen Charts. Es liegt in
  *     der Verantwortung des Benutzers, nur einen aller laufenden EventTracker für die Orderüberwachung zu aktivieren.
  *     Folgende Events werden überwacht:
  *
@@ -15,7 +15,7 @@
  *
  *
  * (2) Preis-Events (Signale)
- *     Ein aktiver Preis-EventTracker überwacht die in der Account-Konfiguration konfigurierten Signale des Instruments des
+ *     Ein aktiver PreisEvent-Tracker überwacht die in der Account-Konfiguration konfigurierten Signale des Instruments des
  *     aktuellen Charts. Es liegt in der Verantwortung des Benutzers, nur einen EventTracker je Instrument für Preis-Events
  *     zu aktivieren. Folgende Events können überwacht werden:
  *
@@ -40,15 +40,13 @@
  *
  * TODO:
  * -----
- *  - Benachrichtigung per IRC
- *  - Candle-Pattern: neues Inside-Range-Pattern und Auflösung desselben auf Timeframe-Basis
  *  - PositionOpen-/Close-Events während Timeframe- oder Symbolwechsel werden nicht erkannt
+ *  - Candle-Pattern: neues Inside-Range-Pattern und Auflösung desselben auf Timeframe-Basis
  *  - bei Accountwechsel auftretende Fehler werden nicht abgefangen
- *  - Konfiguration während eines init-Cycles im Chart speichern und Recompilation überleben
  */
 #include <stddefines.mqh>
-int   __INIT_FLAGS__[];
-int __DEINIT_FLAGS__[];
+int   __InitFlags[];
+int __DeinitFlags[];
 
 ////////////////////////////////////////////////////// Configuration ////////////////////////////////////////////////////////
 
@@ -66,9 +64,9 @@ extern string Signal.SMS.Receiver  = "on | off | auto* | {phone-number}";
 #include <core/indicator.mqh>
 #include <stdfunctions.mqh>
 #include <rsfLibs.mqh>
-#include <functions/Configure.Signal.Mail.mqh>
-#include <functions/Configure.Signal.SMS.mqh>
-#include <functions/Configure.Signal.Sound.mqh>
+#include <functions/ConfigureSignalMail.mqh>
+#include <functions/ConfigureSignalSMS.mqh>
+#include <functions/ConfigureSignalSound.mqh>
 #include <functions/iBarShiftNext.mqh>
 #include <functions/iBarShiftPrevious.mqh>
 #include <functions/iChangedBars.mqh>
@@ -149,6 +147,7 @@ bool Configure() {
    bool signal.enabled;
    double dValue, dValue1, dValue2, dValue3;
    string keys[], subKeys[], section, key, subKey, sDigits, sParam, iniValue, accountConfig = GetAccountConfigPath();
+   if (!StringLen(accountConfig)) return(false);
 
    // Track.Orders
    track.orders = false;
@@ -374,9 +373,9 @@ bool Configure() {
 
    // (3) Signalisierungs-Methoden einlesen
    if (track.orders || track.signals) {
-      if (!Configure.Signal.Sound(Signal.Sound,         signal.sound                                         )) return(last_error);
-      if (!Configure.Signal.SMS  (Signal.SMS.Receiver,  signal.sms,                      signal.sms.receiver )) return(last_error);
-      if (!Configure.Signal.Mail (Signal.Mail.Receiver, signal.mail, signal.mail.sender, signal.mail.receiver)) return(last_error);
+      if (!ConfigureSignalSound(Signal.Sound,         signal.sound                                         )) return(last_error);
+      if (!ConfigureSignalSMS  (Signal.SMS.Receiver,  signal.sms,                      signal.sms.receiver )) return(last_error);
+      if (!ConfigureSignalMail (Signal.Mail.Receiver, signal.mail, signal.mail.sender, signal.mail.receiver)) return(last_error);
    }
 
    return(!ShowStatus(catch("Configure(15)")));
@@ -410,7 +409,7 @@ bool Configure.SetParameter(int signal, int timeframe, int lookback, string para
                break;
    }
    if (i == size) {
-      if (__LOG()) log("Configure.SetParameter(1)  main configuration for signal parameter "+ SignalToStr(signal) +"."+ param +"="+ DoubleQuoteStr(value) +" not found");
+      if (IsLogInfo()) logInfo("Configure.SetParameter(1)  main configuration for signal parameter "+ SignalToStr(signal) +"."+ param +"="+ DoubleQuoteStr(value) +" not found");
       return(true);
    }
    // i zeigt hier immer auf das zu modifizierende Signal
@@ -421,7 +420,7 @@ bool Configure.SetParameter(int signal, int timeframe, int lookback, string para
       if (lParam == "ontouch") {
          signal.config[i][SIGNAL_CONFIG_PARAM2] = StrToBool(value);
       }
-      else if (__LOG()) log("Configure.SetParameter(2)  BarClose signal: unknown parameter "+ param +"="+ DoubleQuoteStr(value));
+      else if (IsLogInfo()) logInfo("Configure.SetParameter(2)  BarClose signal: unknown parameter "+ param +"="+ DoubleQuoteStr(value));
       return(true);
    }
 
@@ -463,7 +462,7 @@ bool Configure.SetParameter(int signal, int timeframe, int lookback, string para
 
          signal.config[i][SIGNAL_CONFIG_PARAM3] = iValue;
       }
-      else if (__LOG()) log("Configure.SetParameter(3)  BarRange signal: unknown parameter "+ param +"="+ DoubleQuoteStr(value));
+      else if (IsLogInfo()) logInfo("Configure.SetParameter(3)  BarRange signal: unknown parameter "+ param +"="+ DoubleQuoteStr(value));
       return(true);
    }
 
@@ -685,7 +684,7 @@ bool onOrderFail(int tickets[]) {
       string price       = NumberToStr(OrderOpenPrice(), priceFormat);
       string message     = "Order failed: "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" at "+ price + NL +"with error: \""+ OrderComment() +"\""+ NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ orders.accountAlias +")";
 
-      if (__LOG()) log("onOrderFail(2)  "+ message);
+      if (IsLogInfo()) logInfo("onOrderFail(2)  "+ message);
 
       // Signale für jede Order einzeln verschicken
       if (signal.mail) error |= !SendEmail(signal.mail.sender, signal.mail.receiver, message, message);
@@ -725,7 +724,7 @@ bool onPositionOpen(int tickets[]) {
       string price       = NumberToStr(OrderOpenPrice(), priceFormat);
       string message     = "Position opened: "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" at "+ price + NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ orders.accountAlias +")";
 
-      if (__LOG()) log("onPositionOpen(2)  "+ message);
+      if (IsLogInfo()) logInfo("onPositionOpen(2)  "+ message);
 
       // Signale für jede Position einzeln verschicken
       if (signal.mail) error |= !SendEmail(signal.mail.sender, signal.mail.receiver, message, message);
@@ -770,7 +769,7 @@ bool onPositionClose(int tickets[][]) {
       string closePrice  = NumberToStr(OrderClosePrice(), priceFormat);
       string message     = "Position closed: "+ type +" "+ lots +" "+ GetStandardSymbol(OrderSymbol()) +" open="+ openPrice +" close="+ closePrice + closeTypeDescr[closeType] + NL +"("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +", "+ orders.accountAlias +")";
 
-      if (__LOG()) log("onPositionClose(2)  "+ message);
+      if (IsLogInfo()) logInfo("onPositionClose(2)  "+ message);
 
       // Signale für jede Position einzeln verschicken
       if (signal.mail) error |= !SendEmail(signal.mail.sender, signal.mail.receiver, message, message);
@@ -865,7 +864,7 @@ bool onBarCloseSignal(int index, int direction) {
    if (direction!=SIGNAL_UP && direction!=SIGNAL_DOWN) return(!catch("onBarCloseSignal(1)  invalid parameter direction = "+ direction, ERR_INVALID_PARAMETER));
 
    string message = "";
-   if (__LOG()) log("onBarCloseSignal(2)  "+ message);
+   if (IsLogInfo()) logInfo("onBarCloseSignal(2)  "+ message);
 
 
    // (1) Sound abspielen
@@ -935,7 +934,7 @@ bool BarRangeSignal.Init(int index, bool barOpen = false) {
       closeBar = iBarShiftPrevious(NULL, testTimeframe, closeTime.srv-1*SECOND); if (closeBar == EMPTY_VALUE) return(false);
       if (closeBar == -1) {                                                            // nicht ausreichende Daten zum Tracking: Signal deaktivieren
          signal.config[index][SIGNAL_CONFIG_ENABLED] = false;
-         return(!warn("BarRangeSignal.Init(4)  signal "+ index, ERR_HISTORY_INSUFFICIENT));
+         return(!logWarn("BarRangeSignal.Init(4)  signal "+ index, ERR_HISTORY_INSUFFICIENT));
       }
       if (openBar < closeBar) {                                                        // Datenlücke, i zurücksetzen und weiter zu den nächsten verfügbaren Daten
          i--;
@@ -1024,13 +1023,9 @@ bool BarRangeSignal.Check(int index) {
 
 
    // (2) changedBars(testTimeframe) für die Testdatenreihe ermitteln
-   int oldError    = last_error;
-   int changedBars = iChangedBars(NULL, testTimeframe, F_ERR_SERIES_NOT_AVAILABLE);
-   if (changedBars == -1) {                                                               // Fehler
-      if (last_error == ERR_SERIES_NOT_AVAILABLE)
-         return(_true(SetLastError(oldError)));                                           // ERR_SERIES_NOT_AVAILABLE unterdrücken: Prüfung setzt fort, wenn Daten eingetroffen sind
-      return(false);
-   }
+   int changedBars = iChangedBars(NULL, testTimeframe);
+   if (changedBars == -1) return(false);
+
    if (!changedBars)                                                                      // z.B. bei Aufruf in init() oder deinit()
       return(true);
    //debug("BarRangeSignal.Check(2)       changedBars="+ changedBars +"  tick.new="+ tick.new);
@@ -1176,7 +1171,7 @@ bool onBarRangeSignal(int index, int direction, double level, double price, date
    int signal.bar       = signal.config[index][SIGNAL_CONFIG_BAR      ];
 
    string message = StdSymbol() +" broke "+ BarDescription(signal.timeframe, signal.bar) +"'s "+ ifString(direction==SIGNAL_UP, "high", "low") +" of "+ NumberToStr(level, PriceFormat) + NL +" ("+ TimeToStr(GetLocalTime(), TIME_MINUTES|TIME_SECONDS) +")";
-   if (__LOG()) log("onBarRangeSignal(2)  "+ message);
+   if (IsLogInfo()) logInfo("onBarRangeSignal(2)  "+ message);
 
    int error = 0;
 
@@ -1239,7 +1234,7 @@ int ShowStatus(int error=NULL) {
    if (!error)                        sError    = "";
    else                               sError    = "  ["+ ErrorDescription(error) +"]";
 
-   string msg = StringConcatenate(__NAME(), sSettings, sError, NL);
+   string msg = StringConcatenate(ProgramName(), sSettings, sError, NL);
 
    if (track.orders || track.signals) {
       msg    = StringConcatenate(msg, "-------------------",   NL);
@@ -1255,7 +1250,7 @@ int ShowStatus(int error=NULL) {
    }
 
    Comment(NL, NL, NL, msg);
-   if (__WHEREAMI__ == CF_INIT)
+   if (__CoreFunction == CF_INIT)
       WindowRedraw();
    return(error);
 }
